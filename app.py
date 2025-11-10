@@ -1,0 +1,898 @@
+import streamlit as st
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import traceback
+import pandas as pd
+import math
+
+st.set_page_config(page_title="Satelit Links App", layout="wide")
+
+
+def get_db_params():
+    # Prioritize Streamlit secrets, fallback to environment variables
+    try:
+        secrets = st.secrets.get("postgres", {}) if hasattr(st, "secrets") else {}
+    except UnicodeDecodeError as e:
+        st.error("File secrets tidak berformat UTF-8. Simpan `/.streamlit/secrets.toml` sebagai UTF-8.")
+        st.caption(str(e))
+        secrets = {}
+    return {
+        "host": secrets.get("host") or os.getenv("PGHOST", "localhost"),
+        "port": secrets.get("port") or int(os.getenv("PGPORT", 5432)),
+        "dbname": secrets.get("dbname") or os.getenv("PGDATABASE", "satelit"),
+        "user": secrets.get("user") or os.getenv("PGUSER", "postgres"),
+        "password": secrets.get("password") or os.getenv("PGPASSWORD", "18agustuz203"),
+    }
+
+
+def connect_db(params):
+    return psycopg2.connect(
+        host=params["host"],
+        port=params["port"],
+        dbname=params["dbname"],
+        user=params["user"],
+        password=params["password"],
+        cursor_factory=RealDictCursor,
+        options="-c client_encoding=UTF8",
+        connect_timeout=8,
+    )
+
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS clients (
+    client_id SERIAL PRIMARY KEY,
+    client_name VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sites (
+    site_id VARCHAR(50) PRIMARY KEY,
+    site_name VARCHAR(150),
+    site_address TEXT,
+    lat_dec DOUBLE PRECISION,
+    long_dec DOUBLE PRECISION
+);
+
+CREATE TABLE IF NOT EXISTS links (
+    link_id SERIAL PRIMARY KEY,
+    appl_id VARCHAR(50),
+    client_id INT REFERENCES clients(client_id),
+    site_from VARCHAR(50) REFERENCES sites(site_id),
+    site_to VARCHAR(50) REFERENCES sites(site_id),
+    freq INT,
+    freq_pair INT,
+    bandwidth INT,
+    model VARCHAR(100)
+);
+"""
+
+
+st.title("Peta Link Satelit")
+# st.caption("Menampilkan site dan link berdasarkan data di PostgreSQL.")
+
+params = get_db_params()
+
+def run_sql(sql, args=None, fetch: str = "none"):
+    """Jalankan SQL singkat. fetch: none|one|all."""
+    conn = connect_db(params)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args or ())
+            if fetch == "one":
+                row = cur.fetchone()
+            elif fetch == "all":
+                row = cur.fetchall()
+            else:
+                row = None
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+def reseed_clients_id_sequence():
+    """Sinkronkan sequence clients.client_id agar lanjut setelah MAX(client_id)."""
+    try:
+        run_sql(
+            """
+            SELECT setval(
+                pg_get_serial_sequence('clients','client_id'),
+                COALESCE((SELECT MAX(client_id) FROM clients), 0),
+                true
+            )
+            """
+        )
+    except Exception:
+        # Abaikan jika gagal (mis. bukan SERIAL), agar tidak memblokir aksi utama
+        pass
+
+def reseed_links_id_sequence():
+    """Sinkronkan sequence links.link_id setelah insert manual."""
+    try:
+        run_sql(
+            """
+            SELECT setval(
+                pg_get_serial_sequence('links','link_id'),
+                COALESCE((SELECT MAX(link_id) FROM links), 0),
+                true
+            )
+            """
+        )
+    except Exception:
+        pass
+
+with st.sidebar:
+    if st.button("Init/Terapkan Schema DB"):
+        try:
+            run_sql(SCHEMA_SQL)
+            st.success("Schema berhasil diterapkan/ada.")
+        except Exception as e:
+            st.error(f"Gagal membuat schema: {e}")
+
+@st.cache_data(show_spinner=False)
+def load_data(_params):
+    sql_clients = "select client_id, client_name from clients order by client_id"
+    sql_sites = "select site_id, site_name, site_address, lat_dec, long_dec from sites"
+    sql_links = "select link_id, appl_id, client_id, site_from, site_to, freq, freq_pair, bandwidth, model from links"
+    conn = connect_db(_params)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql_clients)
+            clients = pd.DataFrame(cur.fetchall()) if cur.rowcount != -1 else pd.DataFrame()
+            cur.execute(sql_sites)
+            sites = pd.DataFrame(cur.fetchall()) if cur.rowcount != -1 else pd.DataFrame()
+            cur.execute(sql_links)
+            links = pd.DataFrame(cur.fetchall()) if cur.rowcount != -1 else pd.DataFrame()
+    finally:
+        conn.close()
+    return clients, sites, links
+
+try:
+    clients_df, sites_df, links_df = load_data(params)
+except Exception as e:
+    st.error(f"Gagal mengambil data: {e}")
+    st.caption("Cek koneksi dan kredensial database.")
+    st.stop()
+
+with st.sidebar:
+    st.header("Filter")
+    client_options = {int(row.client_id): row.client_name for _, row in clients_df.iterrows()} if not clients_df.empty else {}
+    selected_client = st.selectbox(
+        "Client",
+        options=[None] + list(client_options.keys()),
+        format_func=lambda v: "Semua" if v is None else f"{v} — {client_options[v]}",
+    )
+    st.caption("Pilih client untuk memfilter link.")
+    sep_dup = st.checkbox("Pisahkan titik site berkoordinat sama", value=True)
+    sep_dist_m = st.slider("Jarak pisah (meter)", min_value=5, max_value=50, value=18, step=1, disabled=not sep_dup)
+    # Gunakan Folium (cluster) sebagai default tanpa perlu toggle
+    use_folium = True
+
+def _refresh_and_rerun():
+    load_data.clear()
+    st.rerun()
+
+# Dialogs for Clients
+@st.dialog("Tambah Client")
+def dlg_add_client():
+    name = st.text_input("Nama Client", placeholder="cth: INDOSAT TBK, PT.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_add_client_cancel"):
+            st.experimental_set_query_params()  # no-op to close
+            st.rerun()
+    with col_b:
+        if st.button("Simpan", type="primary", key="dlg_add_client_save"):
+            if not name.strip():
+                st.error("Nama client wajib diisi.")
+                return
+            try:
+                try:
+                    run_sql("INSERT INTO clients(client_name) VALUES (%s)", (name.strip(),))
+                except Exception:
+                    reseed_clients_id_sequence()
+                    run_sql("INSERT INTO clients(client_name) VALUES (%s)", (name.strip(),))
+                st.success("Client berhasil ditambah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menambah client: {e}")
+
+@st.dialog("Ubah Client")
+def dlg_edit_client(edit_id: int, current_name: str):
+    new_name = st.text_input("Nama Client", value=current_name)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_edit_client_cancel"):
+            st.rerun()
+    with col_b:
+        if st.button("Simpan", type="primary", key="dlg_edit_client_save"):
+            if not new_name.strip():
+                st.error("Nama baru tidak boleh kosong.")
+                return
+            try:
+                run_sql("UPDATE clients SET client_name=%s WHERE client_id=%s", (new_name.strip(), int(edit_id)))
+                st.success("Client berhasil diubah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal mengubah client: {e}")
+
+@st.dialog("Hapus Client")
+def dlg_delete_clients(del_ids: list, label_map: dict):
+    st.write("Anda akan menghapus:")
+    for cid in del_ids:
+        st.write(f"- {cid} — {label_map.get(cid, '')}")
+    st.info("Akan gagal jika client dipakai di links.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_delete_clients_cancel"):
+            st.rerun()
+    with col_b:
+        if st.button("Hapus", type="primary", key="dlg_delete_clients_confirm"):
+            try:
+                for cid in del_ids:
+                    run_sql("DELETE FROM clients WHERE client_id=%s", (int(cid),))
+                st.success("Client terhapus.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menghapus: {e}")
+
+with st.expander("Kelola Clients", expanded=False):
+    st.subheader("Daftar Clients")
+
+    # Toolbar: search on the left, add button on the right
+    t1, t2 = st.columns([3, 1])
+    with t1:
+        q = st.text_input("Cari client", placeholder="ketik nama/id untuk filter…", key="clients_search")
+    with t2:
+        if st.button("Tambah Client", use_container_width=True, key="btn_open_add_client"):
+            dlg_add_client()
+
+    # Filtered view
+    clients_view = clients_df.copy()
+    if not clients_view.empty and q:
+        ql = str(q).strip().lower()
+        clients_view = clients_view[
+            clients_view["client_name"].astype(str).str.lower().str.contains(ql)
+            | clients_view["client_id"].astype(str).str.contains(ql)
+        ]
+
+    ctable, cactions = st.columns([3, 1])
+    with ctable:
+        if clients_view.empty:
+            st.info("Tidak ada data client yang cocok.")
+        else:
+            st.dataframe(
+                clients_view.sort_values(["client_name", "client_id"], kind="stable"),
+                use_container_width=True,
+                hide_index=True,
+                height=300,
+                column_config={
+                    "client_id": st.column_config.NumberColumn("ID", width="small"),
+                    "client_name": st.column_config.TextColumn("Nama Client", width="medium"),
+                },
+            )
+
+    with cactions:
+        st.markdown("**Aksi**")
+        if clients_df.empty:
+            st.caption("Tambahkan client terlebih dahulu.")
+        else:
+            edit_pick = st.selectbox(
+                "Pilih client",
+                options=[None] + list(clients_df["client_id"].astype(int)),
+                format_func=lambda v: "— pilih —" if v is None else f"{v} — {clients_df.loc[clients_df.client_id==v, 'client_name'].values[0]}",
+                key="clients_pick_action",
+            )
+            if st.button("Ubah", disabled=edit_pick is None, use_container_width=True, key="btn_open_edit_client"):
+                if edit_pick is not None:
+                    current_name = str(clients_df.loc[clients_df.client_id==edit_pick, 'client_name'].values[0])
+                    dlg_edit_client(edit_pick, current_name)
+            if st.button("Hapus", disabled=edit_pick is None, use_container_width=True, key="btn_open_delete_client"):
+                if edit_pick is not None:
+                    label_map = {int(r.client_id): r.client_name for _, r in clients_df.iterrows()}
+                    dlg_delete_clients([int(edit_pick)], label_map)
+
+def _valid_latlon(lat, lon):
+        try:
+            if lat is None or lon is None:
+                return False, "Koordinat wajib diisi."
+            lat = float(lat)
+            lon = float(lon)
+        except Exception:
+            return False, "Koordinat tidak valid."
+        if not (-90 <= lat <= 90):
+            return False, "Latitude harus di antara -90 s/d 90."
+        if not (-180 <= lon <= 180):
+            return False, "Longitude harus di antara -180 s/d 180."
+        return True, "OK"
+@st.dialog("Tambah Site")
+def dlg_add_site():
+    site_id_in = st.text_input("Site ID", placeholder="cth: 1 atau LAWAN_1")
+    site_name_in = st.text_input("Nama Site", placeholder="cth: 030700_PINTU ANGIN")
+    site_addr_in = st.text_area("Alamat (opsional)", placeholder="alamat lengkap…", height=80)
+    lat_in = st.number_input("Latitude", step=0.000001, format="%.8f")
+    lon_in = st.number_input("Longitude", step=0.000001, format="%.8f")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_add_site_cancel"):
+            st.rerun()
+    with col_b:
+        if st.button("Simpan", type="primary", key="dlg_add_site_save"):
+            if not site_id_in.strip() or not site_name_in.strip():
+                st.error("Site ID dan Nama wajib diisi.")
+                return
+            valid, msg = _valid_latlon(lat_in, lon_in)
+            if not valid:
+                st.error(msg)
+                return
+            try:
+                run_sql(
+                    "INSERT INTO sites(site_id, site_name, site_address, lat_dec, long_dec) VALUES (%s,%s,%s,%s,%s)",
+                    (site_id_in.strip(), site_name_in.strip(), site_addr_in.strip() or None, float(lat_in), float(lon_in)),
+                )
+                st.success("Site berhasil ditambah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menambah site: {e}")
+
+@st.dialog("Ubah Site")
+def dlg_edit_site(sid: str, srow):
+    sname = st.text_input("Nama Site", value=str(srow.site_name or ""))
+    saddr = st.text_area("Alamat (opsional)", value=str(srow.site_address or ""), height=80)
+    slat = st.number_input("Latitude", value=float(srow.lat_dec) if pd.notna(srow.lat_dec) else 0.0, step=0.000001, format="%.8f")
+    slon = st.number_input("Longitude", value=float(srow.long_dec) if pd.notna(srow.long_dec) else 0.0, step=0.000001, format="%.8f")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_edit_site_cancel"):
+            st.rerun()
+    with col_b:
+        if st.button("Simpan", type="primary", key="dlg_edit_site_save"):
+            if not sname.strip():
+                st.error("Nama Site wajib diisi.")
+                return
+            valid, msg = _valid_latlon(slat, slon)
+            if not valid:
+                st.error(msg)
+                return
+            try:
+                run_sql(
+                    "UPDATE sites SET site_name=%s, site_address=%s, lat_dec=%s, long_dec=%s WHERE site_id=%s",
+                    (sname.strip(), saddr.strip() or None, float(slat), float(slon), sid),
+                )
+                st.success("Site berhasil diubah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal mengubah site: {e}")
+
+@st.dialog("Hapus Site")
+def dlg_delete_sites(del_sids: list):
+    st.write("Anda akan menghapus site berikut:")
+    for sid in del_sids:
+        st.write(f"- {sid}")
+    st.info("Akan gagal jika site dipakai di links.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Batal", key="dlg_delete_site_cancel"):
+            st.rerun()
+    with col_b:
+        if st.button("Hapus", type="primary", key="dlg_delete_site_confirm"):
+            try:
+                for sid in del_sids:
+                    run_sql("DELETE FROM sites WHERE site_id=%s", (sid,))
+                st.success("Site terhapus.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menghapus site: {e}")
+
+with st.expander("Kelola Sites", expanded=False):
+    st.subheader("Daftar Sites")
+
+    # Toolbar: search + add
+    t1, t2 = st.columns([3, 1])
+    with t1:
+        s_q = st.text_input("Cari site", placeholder="ketik ID/nama/alamat…", key="sites_search")
+    with t2:
+        if st.button("Tambah Site", use_container_width=True, key="btn_open_add_site"):
+            dlg_add_site()
+
+    # Filtered view
+    sites_view = sites_df.copy()
+    if not sites_view.empty and s_q:
+        ql = str(s_q).strip().lower()
+        sites_view = sites_view[
+            sites_view["site_id"].astype(str).str.lower().str.contains(ql)
+            | sites_view["site_name"].astype(str).str.lower().str.contains(ql)
+            | sites_view["site_address"].astype(str).str.lower().str.contains(ql)
+        ]
+
+    stable, sactions = st.columns([3, 1])
+    with stable:
+        if sites_view.empty:
+            st.info("Tidak ada data site yang cocok.")
+        else:
+            st.dataframe(
+                sites_view.sort_values(["site_name", "site_id"], kind="stable"),
+                use_container_width=True,
+                hide_index=True,
+                height=320,
+                column_config={
+                    "site_id": st.column_config.TextColumn("Site ID", width="small"),
+                    "site_name": st.column_config.TextColumn("Nama Site", width="medium"),
+                    "site_address": st.column_config.TextColumn("Alamat", width="large"),
+                    "lat_dec": st.column_config.NumberColumn("Lat", width="small"),
+                    "long_dec": st.column_config.NumberColumn("Lon", width="small"),
+                },
+            )
+
+    with sactions:
+        st.markdown("**Aksi**")
+        if sites_df.empty:
+            st.caption("Tambahkan site terlebih dahulu.")
+        else:
+            pick_site = st.selectbox(
+                "Pilih site",
+                options=[None] + list(sites_df["site_id"].astype(str)),
+                format_func=lambda v: "— pilih —" if v is None else f"{v} — {sites_df.loc[sites_df.site_id==v, 'site_name'].values[0] if (sites_df.site_id==v).any() else ''}",
+                key="sites_pick_action",
+            )
+            if st.button("Ubah", disabled=pick_site is None, use_container_width=True, key="btn_open_edit_site"):
+                if pick_site is not None:
+                    srow = sites_df.loc[sites_df.site_id == pick_site].iloc[0]
+                    dlg_edit_site(pick_site, srow)
+            if st.button("Hapus", disabled=pick_site is None, use_container_width=True, key="btn_open_delete_site"):
+                if pick_site is not None:
+                    dlg_delete_sites([pick_site])
+
+# -------------------------------
+# Kelola Links (CRUD)
+# -------------------------------
+def _build_client_map(df: pd.DataFrame):
+    return {int(r.client_id): str(r.client_name) for _, r in df.iterrows()} if not df.empty else {}
+
+def _build_site_label_map(df: pd.DataFrame):
+    if df.empty:
+        return {}
+    m = {}
+    for _, r in df.iterrows():
+        sid = str(r["site_id"])
+        label = f"{sid} — {r['site_name']}" if pd.notna(r.get("site_name")) else sid
+        m[sid] = label
+    return m
+
+@st.dialog("Tambah Link")
+def dlg_add_link(client_map, site_label_map):
+    appl_id = st.text_input("Application ID", placeholder="mis: 2460852112021")
+    client_id = st.selectbox("Client", options=list(client_map.keys()), format_func=lambda v: f"{v} — {client_map[v]}", key="addlink_client")
+    site_from = st.selectbox("Site From", options=list(site_label_map.keys()), format_func=lambda v: site_label_map[v], key="addlink_from")
+    site_to = st.selectbox("Site To", options=list(site_label_map.keys()), format_func=lambda v: site_label_map[v], key="addlink_to")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        freq = st.number_input("Freq (MHz)", value=0, step=1, min_value=0, key="addlink_freq")
+    with col2:
+        freq_pair = st.number_input("Freq Pair (MHz)", value=0, step=1, min_value=0, key="addlink_freqpair")
+    with col3:
+        bandwidth = st.number_input("Bandwidth (kHz)", value=0, step=1000, min_value=0, key="addlink_bw")
+    model = st.text_input("Model", placeholder="mis: 23G_XMC2_128Q_28M_157M")
+
+    a, b = st.columns(2)
+    with a:
+        if st.button("Batal", key="dlg_add_link_cancel"):
+            st.rerun()
+    with b:
+        if st.button("Simpan", type="primary", key="dlg_add_link_save"):
+            if not appl_id.strip():
+                st.error("Application ID wajib diisi.")
+                return
+            if not site_from or not site_to:
+                st.error("Site From dan Site To wajib diisi.")
+                return
+            try:
+                try:
+                    run_sql(
+                        """
+                        INSERT INTO links(appl_id, client_id, site_from, site_to, freq, freq_pair, bandwidth, model)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (appl_id.strip(), int(client_id), str(site_from), str(site_to), int(freq), int(freq_pair), int(bandwidth), model.strip() or None),
+                    )
+                except Exception:
+                    # Perbaiki sequence yang mungkin tertinggal karena insert manual
+                    reseed_links_id_sequence()
+                    run_sql(
+                        """
+                        INSERT INTO links(appl_id, client_id, site_from, site_to, freq, freq_pair, bandwidth, model)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (appl_id.strip(), int(client_id), str(site_from), str(site_to), int(freq), int(freq_pair), int(bandwidth), model.strip() or None),
+                    )
+                st.success("Link berhasil ditambah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menambah link: {e}")
+
+@st.dialog("Ubah Link")
+def dlg_edit_link(link_row, client_map, site_label_map):
+    appl_id = st.text_input("Application ID", value=str(link_row.get("appl_id") or ""), key="editlink_appl")
+    client_id = st.selectbox("Client", options=list(client_map.keys()), index=list(client_map.keys()).index(int(link_row["client_id"])), format_func=lambda v: f"{v} — {client_map[v]}", key="editlink_client")
+    site_from = st.selectbox("Site From", options=list(site_label_map.keys()), index=list(site_label_map.keys()).index(str(link_row["site_from"])), format_func=lambda v: site_label_map[v], key="editlink_from")
+    site_to = st.selectbox("Site To", options=list(site_label_map.keys()), index=list(site_label_map.keys()).index(str(link_row["site_to"])), format_func=lambda v: site_label_map[v], key="editlink_to")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        freq = st.number_input("Freq (MHz)", value=int(link_row.get("freq") or 0), step=1, min_value=0, key="editlink_freq")
+    with col2:
+        freq_pair = st.number_input("Freq Pair (MHz)", value=int(link_row.get("freq_pair") or 0), step=1, min_value=0, key="editlink_freqpair")
+    with col3:
+        bandwidth = st.number_input("Bandwidth (kHz)", value=int(link_row.get("bandwidth") or 0), step=1000, min_value=0, key="editlink_bw")
+    model = st.text_input("Model", value=str(link_row.get("model") or ""), key="editlink_model")
+
+    a, b = st.columns(2)
+    with a:
+        if st.button("Batal", key="dlg_edit_link_cancel"):
+            st.rerun()
+    with b:
+        if st.button("Simpan", type="primary", key="dlg_edit_link_save"):
+            if not appl_id.strip():
+                st.error("Application ID wajib diisi.")
+                return
+            try:
+                run_sql(
+                    """
+                    UPDATE links SET appl_id=%s, client_id=%s, site_from=%s, site_to=%s, freq=%s, freq_pair=%s, bandwidth=%s, model=%s
+                    WHERE link_id=%s
+                    """,
+                    (appl_id.strip(), int(client_id), str(site_from), str(site_to), int(freq), int(freq_pair), int(bandwidth), model.strip() or None, int(link_row["link_id"]))
+                )
+                st.success("Link berhasil diubah.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal mengubah link: {e}")
+
+@st.dialog("Hapus Link")
+def dlg_delete_links(del_ids: list):
+    st.write("Anda akan menghapus link_id:")
+    for lid in del_ids:
+        st.write(f"- {lid}")
+    a, b = st.columns(2)
+    with a:
+        if st.button("Batal", key="dlg_delete_links_cancel"):
+            st.rerun()
+    with b:
+        if st.button("Hapus", type="primary", key="dlg_delete_links_confirm"):
+            try:
+                for lid in del_ids:
+                    run_sql("DELETE FROM links WHERE link_id=%s", (int(lid),))
+                st.success("Link terhapus.")
+                _refresh_and_rerun()
+            except Exception as e:
+                st.error(f"Gagal menghapus link: {e}")
+
+with st.expander("Kelola Links", expanded=False):
+    st.subheader("Daftar Links")
+    client_map = _build_client_map(clients_df)
+    site_label_map = _build_site_label_map(sites_df)
+
+    # Toolbar
+    lt1, lt2, lt3 = st.columns([2, 2, 1])
+    with lt1:
+        lk_q = st.text_input("Cari (appl_id/model/site)", placeholder="ketik untuk filter…", key="links_search")
+    with lt2:
+        lk_client = st.selectbox("Filter Client", options=[None] + list(client_map.keys()), format_func=lambda v: "Semua" if v is None else f"{v} — {client_map[v]}", key="links_filter_client")
+    with lt3:
+        if st.button("Tambah Link", use_container_width=True, key="btn_open_add_link"):
+            if not client_map or not site_label_map:
+                st.warning("Pastikan data clients dan sites tersedia dulu.")
+            else:
+                dlg_add_link(client_map, site_label_map)
+
+    links_view = links_df.copy()
+    if not links_view.empty:
+        if lk_client is not None:
+            links_view = links_view[links_view["client_id"] == int(lk_client)]
+        if lk_q:
+            ql = str(lk_q).strip().lower()
+            # Build lookup label columns for sites
+            lab_map = site_label_map
+            links_view = links_view.copy()
+            links_view["from_label"] = links_view["site_from"].astype(str).map(lab_map)
+            links_view["to_label"] = links_view["site_to"].astype(str).map(lab_map)
+            links_view = links_view[
+                links_view["appl_id"].astype(str).str.lower().str.contains(ql)
+                | links_view["model"].astype(str).str.lower().str.contains(ql)
+                | links_view["from_label"].astype(str).str.lower().str.contains(ql)
+                | links_view["to_label"].astype(str).str.lower().str.contains(ql)
+            ]
+
+    ltable, lactions = st.columns([4, 1])
+    with ltable:
+        if links_view.empty:
+            st.info("Tidak ada link yang cocok.")
+        else:
+            disp = links_view.copy()
+            disp["from_label"] = disp["site_from"].astype(str).map(site_label_map)
+            disp["to_label"] = disp["site_to"].astype(str).map(site_label_map)
+            st.dataframe(
+                disp[["link_id", "appl_id", "client_id", "from_label", "to_label", "freq", "freq_pair", "bandwidth", "model"]].sort_values("link_id"),
+                use_container_width=True,
+                hide_index=True,
+                height=320,
+                column_config={
+                    "link_id": st.column_config.NumberColumn("ID", width="small"),
+                    "appl_id": st.column_config.TextColumn("Appl ID", width="medium"),
+                    "client_id": st.column_config.NumberColumn("Client", width="small"),
+                    "from_label": st.column_config.TextColumn("From", width="medium"),
+                    "to_label": st.column_config.TextColumn("To", width="medium"),
+                    "freq": st.column_config.NumberColumn("Freq", width="small"),
+                    "freq_pair": st.column_config.NumberColumn("Pair", width="small"),
+                    "bandwidth": st.column_config.NumberColumn("BW", width="small"),
+                    "model": st.column_config.TextColumn("Model", width="medium"),
+                },
+            )
+    with lactions:
+        st.markdown("**Aksi**")
+        if links_df.empty:
+            st.caption("Tambahkan link terlebih dahulu.")
+        else:
+            pick_link = st.selectbox(
+                "Pilih link",
+                options=[None] + list(links_df["link_id"].astype(int)),
+                format_func=lambda v: "— pilih —" if v is None else f"#{v}",
+                key="links_pick_action",
+            )
+            if st.button("Ubah", disabled=pick_link is None, use_container_width=True, key="btn_open_edit_link"):
+                if pick_link is not None:
+                    row = links_df.loc[links_df.link_id == int(pick_link)].iloc[0]
+                    dlg_edit_link(row, client_map, site_label_map)
+            if st.button("Hapus", disabled=pick_link is None, use_container_width=True, key="btn_open_delete_link"):
+                if pick_link is not None:
+                    dlg_delete_links([int(pick_link)])
+
+if selected_client is not None and not links_df.empty:
+    links_df = links_df[links_df["client_id"] == selected_client]
+
+# Gabungkan koordinat site_from dan site_to
+if sites_df.empty:
+    st.warning("Data sites kosong.")
+    st.stop()
+
+site_cols = ["site_id", "site_name", "lat_dec", "long_dec"]
+sites_min = sites_df[site_cols].copy()
+sites_min.rename(columns={"lat_dec": "lat", "long_dec": "lon"}, inplace=True)
+
+links_merge = links_df.merge(
+    sites_min.add_prefix("from_"), left_on="site_from", right_on="from_site_id", how="left"
+).merge(
+    sites_min.add_prefix("to_"), left_on="site_to", right_on="to_site_id", how="left"
+)
+
+# Buat data untuk layer
+sites_points = sites_min.rename(columns={"site_id": "id", "site_name": "name"})
+
+def _spread_overlaps(df_sites: pd.DataFrame, dist_m: float = 18.0) -> pd.DataFrame:
+    # Sebar titik yang punya lat/lon identik dengan offset kecil berjari-jari dist_m
+    if df_sites.empty:
+        return df_sites
+    rows = []
+    # Kelompokkan berdasarkan koordinat asli
+    grouped = df_sites.groupby(["lat", "lon"], dropna=False, as_index=False)
+    for (lat, lon), group in grouped:
+        n = len(group)
+        if n == 1 or not sep_dup:
+            for _, r in group.iterrows():
+                rr = r.to_dict()
+                rr.update({"orig_lat": lat, "orig_lon": lon, "group_size": n})
+                rows.append(rr)
+            continue
+        # Hitung offset
+        lat_rad = math.radians(lat if pd.notna(lat) else 0.0)
+        dlat = dist_m / 111320.0
+        dlon_unit = dist_m / max(1e-6, (111320.0 * max(0.15, math.cos(lat_rad))))
+        for i, (_, r) in enumerate(group.iterrows()):
+            # Sebar melingkar
+            ang = 2 * math.pi * i / n
+            lat_off = lat + dlat * math.sin(ang)
+            lon_off = lon + dlon_unit * math.cos(ang)
+            rr = r.to_dict()
+            rr["lat"], rr["lon"] = lat_off, lon_off
+            rr.update({"orig_lat": lat, "orig_lon": lon, "group_size": n})
+            rows.append(rr)
+    return pd.DataFrame(rows)
+
+sites_vis = _spread_overlaps(sites_points, float(sep_dist_m) if sep_dup else 0.0)
+
+links_paths = links_merge.dropna(subset=["from_lat", "from_lon", "to_lat", "to_lon"]).copy()
+links_paths["path"] = links_paths.apply(
+    lambda r: [
+        [float(r["from_lon"]), float(r["from_lat"])],
+        [float(r["to_lon"]), float(r["to_lat"])],
+    ],
+    axis=1,
+)
+
+# Hitung bearing (arah) dari from -> to dan titik panah di dekat tujuan
+def _bearing_deg(lat1, lon1, lat2, lon2):
+    # Rumus bearing initial (derajat) dari koordinat geodesi
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlon)
+    brng = math.degrees(math.atan2(x, y))
+    return (brng + 360.0) % 360.0
+
+def _interp_point(lat1, lon1, lat2, lon2, t=0.85):
+    # Interpolasi linear sederhana di ruang lat/lon (cukup untuk jarak pendek)
+    return (lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t)
+
+arrows = []
+for _, r in links_paths.iterrows():
+    lat1, lon1 = float(r["from_lat"]), float(r["from_lon"])
+    lat2, lon2 = float(r["to_lat"]), float(r["to_lon"]) 
+    ang = _bearing_deg(lat1, lon1, lat2, lon2)
+    alat, alon = _interp_point(lat1, lon1, lat2, lon2, 0.82)
+    arrows.append({
+        "lat": alat,
+        "lon": alon,
+        "angle": ang,
+        "label": "➤",  # panah unicode
+        "appl_id": r.get("appl_id"),
+    })
+arrows_df = pd.DataFrame(arrows)
+
+# Tentukan pusat peta
+all_coords = pd.concat([
+    sites_points[["lat", "lon"]],
+    links_paths[["from_lat", "from_lon"]].rename(columns={"from_lat": "lat", "from_lon": "lon"}),
+    links_paths[["to_lat", "to_lon"]].rename(columns={"to_lat": "lat", "to_lon": "lon"}),
+], ignore_index=True)
+
+if not all_coords.empty:
+    center_lat = float(all_coords["lat"].mean())
+    center_lon = float(all_coords["lon"].mean())
+else:
+    center_lat, center_lon = -2.5, 118.0  # roughly Indonesia
+
+if use_folium:
+    import folium
+    from streamlit_folium import st_folium
+
+    # Base map without default tiles; we'll add multiple layers with proper attributions
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=10, tiles=None, control_scale=True)
+
+    providers = [
+        {
+            "name": "OSM Streets",
+            "tiles": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "attr": "&copy; OpenStreetMap contributors"
+        },
+        {
+            "name": "Light",
+            "tiles": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+            "attr": "&copy; OpenStreetMap contributors &copy; CARTO"
+        },
+        {
+            "name": "Dark",
+            "tiles": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+            "attr": "&copy; OpenStreetMap contributors &copy; CARTO"
+        },
+        {
+            "name": "Outdoors",
+            "tiles": "https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
+            "attr": "Map tiles by Stamen Design, CC BY 3.0 — Map data &copy; OpenStreetMap contributors"
+        },
+        {
+            "name": "Esri Streets",
+            "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+            "attr": "Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, and others"
+        },
+        {
+            "name": "Esri Satellite",
+            "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            "attr": "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
+        },
+    ]
+    for p in providers:
+        folium.TileLayer(tiles=p["tiles"], name=p["name"], attr=p["attr"]).add_to(m)
+
+    # Plugins for a more polished UX
+    try:
+        from folium.plugins import MarkerCluster, MiniMap, Fullscreen, MousePosition, MeasureControl, BeautifyIcon, AntPath
+        MarkerCluster(name='Sites').add_to(m)
+        mc = None
+        # find last added MarkerCluster (simplify):
+        for ch in list(m._children.values()):
+            if hasattr(ch, 'layer_name') and ch.layer_name == 'Sites':
+                mc = ch
+        MiniMap(toggle_display=True).add_to(m)
+        Fullscreen().add_to(m)
+        MousePosition(position='bottomright', prefix='Koordinat:', separator=' | ', num_digits=6).add_to(m)
+        MeasureControl(position='topleft', primary_length_unit='meters', secondary_length_unit='kilometers').add_to(m)
+    except Exception:
+        mc = None
+        BeautifyIcon = None
+        AntPath = None
+
+    # Sites as styled markers (clustered if available)
+    for _, row in sites_points.iterrows():
+        lat_v = float(row["lat"])
+        lon_v = float(row["lon"])
+        tooltip = f"{row['name']} ({row['id']})"
+        popup = folium.Popup(
+            f"<b>{row['name']}</b><br>ID: {row['id']}<br>Lat: {lat_v:.6f}<br>Lon: {lon_v:.6f}",
+            max_width=260,
+        )
+        if BeautifyIcon is not None:
+            icon = BeautifyIcon(
+                icon_shape='marker',
+                border_color='#FFFFFF',
+                border_width=2,
+                text_color='#FFFFFF',
+                background_color='#1a73e8',  # Google-ish blue
+                inner_icon_style='font-size:12px;padding-top:2px;'
+            )
+            marker = folium.Marker(location=[lat_v, lon_v], tooltip=tooltip, icon=icon)
+        else:
+            marker = folium.CircleMarker(location=[lat_v, lon_v], radius=6, color='#1a73e8', weight=2, fill=True, fill_opacity=0.9, tooltip=tooltip)
+        marker.add_child(popup)
+        (mc or m).add_child(marker)
+
+    # Links with animated paths for nicer visuals
+    if not links_df.empty:
+        for _, r in links_paths.iterrows():
+            coords = r["path"]
+            latlon = [[coords[0][1], coords[0][0]], [coords[1][1], coords[1][0]]]
+            tooltip = f"{r.get('appl_id', '')} | {r.get('freq','')}/{r.get('freq_pair','')} MHz | BW {r.get('bandwidth','')}"
+            if AntPath is not None:
+                AntPath(latlon, color='#ff6d00', weight=3, opacity=0.8).add_to(m)
+            else:
+                folium.PolyLine(locations=latlon, color="#FF6347", weight=3, opacity=0.8, tooltip=tooltip).add_to(m)
+
+    folium.LayerControl(position='topright', collapsed=True).add_to(m)
+    st_folium(m, use_container_width=True, returned_objects=[])
+else:
+    import pydeck as pdk
+
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=sites_vis,
+        get_position="[lon, lat]",
+        get_fill_color=[0, 122, 255, 180],
+        get_radius=150,
+        pickable=True,
+    )
+
+    path_layer = pdk.Layer(
+        "PathLayer",
+        data=links_paths,
+        get_path="path",
+        get_color=[255, 99, 71, 200],
+        width_scale=1,
+        width_min_pixels=2,
+        get_width=3,
+        pickable=True,
+    )
+
+    # Panah arah menggunakan TextLayer (unicode arrow) diputar sesuai bearing
+    arrow_layer = pdk.Layer(
+        "TextLayer",
+        data=arrows_df,
+        get_position="[lon, lat]",
+        get_text="label",
+        get_color=[255, 80, 0, 230],
+        get_size=18,
+        get_angle="angle",
+        get_alignment_baseline="center",
+        billboard=True,
+        pickable=True,
+    )
+
+    tooltip = {
+        "html": "<b>{name}</b><br/>ID: {id}<br/>Lat: {lat}<br/>Lon: {lon}<br/>Group: {group_size}",
+        "style": {"backgroundColor": "#fff", "color": "#111"},
+    }
+
+    r = pdk.Deck(
+        layers=[path_layer, arrow_layer, scatter_layer],
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=10, pitch=0),
+        map_style="mapbox://styles/mapbox/light-v10",
+        tooltip=tooltip,
+    )
+
+    st.pydeck_chart(r, use_container_width=True)
