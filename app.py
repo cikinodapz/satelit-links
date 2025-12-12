@@ -850,7 +850,8 @@ if use_folium:
         {
             "name": "OSM Streets",
             "tiles": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            "attr": "&copy; OpenStreetMap contributors"
+            "attr": "&copy; OpenStreetMap contributors",
+            "default": True  # Layer default yang ditampilkan pertama
         },
         {
             "name": "Light",
@@ -879,7 +880,8 @@ if use_folium:
         },
     ]
     for p in providers:
-        folium.TileLayer(tiles=p["tiles"], name=p["name"], attr=p["attr"]).add_to(m)
+        is_default = p.get("default", False)
+        folium.TileLayer(tiles=p["tiles"], name=p["name"], attr=p["attr"], show=is_default).add_to(m)
 
     # Plugins for a more polished UX
     try:
@@ -1009,11 +1011,11 @@ if use_folium:
 
     # Tambahkan legend untuk warna operator
     legend_html = """
-    <div style="
+    <div id="operator-legend" style="
         position: fixed;
         bottom: 50px;
         left: 10px;
-        z-index: 1000;
+        z-index: 9999;
         background: white;
         padding: 12px 16px;
         border-radius: 10px;
@@ -1051,6 +1053,25 @@ if use_folium:
 
     folium.LayerControl(position='topright', collapsed=True).add_to(m)
     st_folium(m, use_container_width=True, returned_objects=[])
+    
+    # Tampilkan legend juga sebagai Streamlit component (untuk referensi saat fullscreen)
+    with st.expander("📡 Legend Warna Operator", expanded=False):
+        legend_cols = st.columns(5)
+        with legend_cols[0]:
+            st.markdown("🔴 **Telkomsel**")
+            st.markdown('<div style="width:50px;height:8px;background:#e4002b;border-radius:4px;"></div>', unsafe_allow_html=True)
+        with legend_cols[1]:
+            st.markdown("🔵 **XL Axiata**")
+            st.markdown('<div style="width:50px;height:8px;background:#00529b;border-radius:4px;"></div>', unsafe_allow_html=True)
+        with legend_cols[2]:
+            st.markdown("🟡 **Indosat**")
+            st.markdown('<div style="width:50px;height:8px;background:#ffc600;border-radius:4px;"></div>', unsafe_allow_html=True)
+        with legend_cols[3]:
+            st.markdown("🟣 **Smartfren**")
+            st.markdown('<div style="width:50px;height:8px;background:#8b1a8b;border-radius:4px;"></div>', unsafe_allow_html=True)
+        with legend_cols[4]:
+            st.markdown("🟠 **Lainnya**")
+            st.markdown('<div style="width:50px;height:8px;background:#ff6d00;border-radius:4px;"></div>', unsafe_allow_html=True)
 else:
     import pydeck as pdk
 
