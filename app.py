@@ -661,6 +661,8 @@ links_merge = links_df.merge(
     sites_min.add_prefix("from_"), left_on="site_from", right_on="from_site_id", how="left"
 ).merge(
     sites_min.add_prefix("to_"), left_on="site_to", right_on="to_site_id", how="left"
+).merge(
+    clients_df[["client_id", "client_name"]], on="client_id", how="left"
 )
 
 # Buat data untuk layer
@@ -699,10 +701,97 @@ def _spread_overlaps(df_sites: pd.DataFrame, dist_m: float = 18.0) -> pd.DataFra
 sites_vis = _spread_overlaps(sites_points, float(sep_dist_m) if sep_dup else 0.0)
 
 links_paths = links_merge.dropna(subset=["from_lat", "from_lon", "to_lat", "to_lon"]).copy()
+
+def _spread_overlapping_links(df: pd.DataFrame, offset_m: float = 30.0) -> pd.DataFrame:
+    """
+    Sebar link yang punya koordinat from-to identik dengan offset tegak lurus,
+    sehingga setiap link tampil sebagai garis terpisah.
+    offset_m: jarak offset dalam meter antar garis.
+    """
+    if df.empty:
+        return df
+    
+    # Buat key unik untuk setiap pasangan from-to (urutan penting karena directed)
+    df = df.copy()
+    df["_link_key"] = df.apply(
+        lambda r: f"{r['from_lat']:.8f},{r['from_lon']:.8f}->{r['to_lat']:.8f},{r['to_lon']:.8f}",
+        axis=1
+    )
+    
+    # Group by link_key dan hitung offset untuk masing-masing
+    grouped = df.groupby("_link_key", as_index=False)
+    
+    new_rows = []
+    for key, group in grouped:
+        n = len(group)
+        if n == 1:
+            # Single link, tidak perlu offset
+            for _, r in group.iterrows():
+                rr = r.to_dict()
+                rr["offset_from_lat"] = r["from_lat"]
+                rr["offset_from_lon"] = r["from_lon"]
+                rr["offset_to_lat"] = r["to_lat"]
+                rr["offset_to_lon"] = r["to_lon"]
+                new_rows.append(rr)
+        else:
+            # Multiple links dengan koordinat sama, beri offset tegak lurus
+            first_row = group.iloc[0]
+            lat1, lon1 = float(first_row["from_lat"]), float(first_row["from_lon"])
+            lat2, lon2 = float(first_row["to_lat"]), float(first_row["to_lon"])
+            
+            # Hitung vektor arah dari from ke to
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            
+            # Vektor perpendicular (tegak lurus)
+            # Normalisasi dengan konversi ke meter (approx)
+            lat_mid = (lat1 + lat2) / 2
+            lat_to_m = 111320.0  # meter per derajat latitude
+            lon_to_m = 111320.0 * max(0.15, math.cos(math.radians(lat_mid)))  # meter per derajat longitude
+            
+            # Panjang vektor dalam meter
+            length_m = math.sqrt((dlat * lat_to_m)**2 + (dlon * lon_to_m)**2)
+            if length_m < 1:
+                length_m = 1  # avoid division by zero
+            
+            # Unit vector perpendicular (rotasi 90 derajat)
+            # Original direction: (dlat, dlon), perpendicular: (-dlon, dlat) normalized
+            perp_lat = -dlon * lon_to_m / length_m  # in "lat-meter" space
+            perp_lon = dlat * lat_to_m / length_m   # in "lon-meter" space
+            
+            # Konversi kembali ke derajat
+            perp_lat_deg = perp_lat / lat_to_m
+            perp_lon_deg = perp_lon / lon_to_m
+            
+            # Sebar link secara simetris
+            for i, (_, r) in enumerate(group.iterrows()):
+                # Offset dari tengah: -((n-1)/2), ..., 0, ..., ((n-1)/2)
+                offset_idx = i - (n - 1) / 2.0
+                offset_distance = offset_idx * offset_m
+                
+                # Terapkan offset
+                off_lat = offset_distance * perp_lat_deg
+                off_lon = offset_distance * perp_lon_deg
+                
+                rr = r.to_dict()
+                rr["offset_from_lat"] = lat1 + off_lat
+                rr["offset_from_lon"] = lon1 + off_lon
+                rr["offset_to_lat"] = lat2 + off_lat
+                rr["offset_to_lon"] = lon2 + off_lon
+                new_rows.append(rr)
+    
+    result = pd.DataFrame(new_rows)
+    if "_link_key" in result.columns:
+        result = result.drop(columns=["_link_key"])
+    return result
+
+# Terapkan spread untuk link yang overlap
+links_paths = _spread_overlapping_links(links_paths, offset_m=25.0)
+
 links_paths["path"] = links_paths.apply(
     lambda r: [
-        [float(r["from_lon"]), float(r["from_lat"])],
-        [float(r["to_lon"]), float(r["to_lat"])],
+        [float(r["offset_from_lon"]), float(r["offset_from_lat"])],
+        [float(r["offset_to_lon"]), float(r["offset_to_lat"])],
     ],
     axis=1,
 )
@@ -723,8 +812,9 @@ def _interp_point(lat1, lon1, lat2, lon2, t=0.85):
 
 arrows = []
 for _, r in links_paths.iterrows():
-    lat1, lon1 = float(r["from_lat"]), float(r["from_lon"])
-    lat2, lon2 = float(r["to_lat"]), float(r["to_lon"]) 
+    # Gunakan koordinat offset agar panah berada di garis yang benar
+    lat1, lon1 = float(r["offset_from_lat"]), float(r["offset_from_lon"])
+    lat2, lon2 = float(r["offset_to_lat"]), float(r["offset_to_lon"]) 
     ang = _bearing_deg(lat1, lon1, lat2, lon2)
     alat, alon = _interp_point(lat1, lon1, lat2, lon2, 0.82)
     arrows.append({
@@ -739,8 +829,8 @@ arrows_df = pd.DataFrame(arrows)
 # Tentukan pusat peta
 all_coords = pd.concat([
     sites_points[["lat", "lon"]],
-    links_paths[["from_lat", "from_lon"]].rename(columns={"from_lat": "lat", "from_lon": "lon"}),
-    links_paths[["to_lat", "to_lon"]].rename(columns={"to_lat": "lat", "to_lon": "lon"}),
+    links_paths[["offset_from_lat", "offset_from_lon"]].rename(columns={"offset_from_lat": "lat", "offset_from_lon": "lon"}),
+    links_paths[["offset_to_lat", "offset_to_lon"]].rename(columns={"offset_to_lat": "lat", "offset_to_lon": "lon"}),
 ], ignore_index=True)
 
 if not all_coords.empty:
@@ -838,11 +928,126 @@ if use_folium:
         for _, r in links_paths.iterrows():
             coords = r["path"]
             latlon = [[coords[0][1], coords[0][0]], [coords[1][1], coords[1][0]]]
-            tooltip = f"{r.get('appl_id', '')} | {r.get('freq','')}/{r.get('freq_pair','')} MHz | BW {r.get('bandwidth','')}"
+            
+            # Ambil informasi link
+            appl_id = r.get('appl_id', '-')
+            freq = r.get('freq', '-')
+            freq_pair = r.get('freq_pair', '-')
+            bandwidth = r.get('bandwidth', '-')
+            model = r.get('model', '-') or '-'
+            site_from = r.get('from_site_name', r.get('site_from', '-'))
+            site_to = r.get('to_site_name', r.get('site_to', '-'))
+            client_name = r.get('client_name', '-') or '-'
+            
+            # Tooltip singkat untuk hover (dengan nama site dan client)
+            tooltip_text = f"🏢 <b>{client_name}</b><br>📡 {site_from} → {site_to}<br>Freq: {freq}/{freq_pair} MHz | BW: {bandwidth} kHz"
+            
+            # Popup lengkap untuk klik
+            popup_html = f"""
+            <div style="font-family: Arial, sans-serif; min-width: 250px;">
+                <h4 style="margin: 0 0 8px 0; color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px;">
+                    📡 Link Info
+                </h4>
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px;">
+                    <div style="font-size: 11px; opacity: 0.9;">🏢 Client</div>
+                    <div style="font-size: 14px; font-weight: bold;">{client_name}</div>
+                </div>
+                <table style="width: 100%; font-size: 12px; border-collapse: collapse;">
+                    <tr><td style="padding: 4px 0; color: #666;"><b>Application ID:</b></td><td style="padding: 4px 0;">{appl_id}</td></tr>
+                    <tr style="background: #f0f7ff;"><td style="padding: 4px 0; color: #666;"><b>📍 From:</b></td><td style="padding: 4px 0;"><b>{site_from}</b></td></tr>
+                    <tr style="background: #f0f7ff;"><td style="padding: 4px 0; color: #666;"><b>📍 To:</b></td><td style="padding: 4px 0;"><b>{site_to}</b></td></tr>
+                    <tr><td style="padding: 4px 0; color: #666;"><b>Frequency:</b></td><td style="padding: 4px 0;"><b style="color: #ff6d00;">{freq} MHz</b></td></tr>
+                    <tr><td style="padding: 4px 0; color: #666;"><b>Freq Pair:</b></td><td style="padding: 4px 0;"><b style="color: #ff6d00;">{freq_pair} MHz</b></td></tr>
+                    <tr style="background: #f5f5f5;"><td style="padding: 4px 0; color: #666;"><b>Bandwidth:</b></td><td style="padding: 4px 0;"><b style="color: #4caf50;">{bandwidth} kHz</b></td></tr>
+                    <tr><td style="padding: 4px 0; color: #666;"><b>Model:</b></td><td style="padding: 4px 0;">{model}</td></tr>
+                </table>
+            </div>
+            """
+            popup = folium.Popup(popup_html, max_width=320)
+            
+            # Buat garis "hitbox" transparan yang lebih tebal untuk area klik yang lebih mudah
+            # Ini adalah trik untuk memperluas area interaktif tanpa mengubah tampilan visual
+            hitbox_line = folium.PolyLine(
+                locations=latlon, 
+                color="transparent",  # Tidak terlihat
+                weight=25,  # Sangat tebal untuk area klik yang luas
+                opacity=0,
+            )
+            hitbox_line.add_child(folium.Tooltip(tooltip_text, sticky=True))
+            hitbox_line.add_child(popup)
+            hitbox_line.add_to(m)
+            
+            # Mapping warna berdasarkan brand operator
+            # Warna utama dan warna pulse untuk animasi
+            client_colors = {
+                'telkomsel': {'main': '#e4002b', 'pulse': '#ff4d6a'},  # Merah Telkomsel
+                'xl': {'main': '#00529b', 'pulse': '#4d8fcc'},  # Biru XL
+                'indosat': {'main': '#ffc600', 'pulse': '#ffe066'},  # Kuning/Emas Indosat
+                'smartfren': {'main': '#8b1a8b', 'pulse': '#c44dc4'},  # Ungu Smartfren
+            }
+            
+            # Cari warna berdasarkan nama client (case insensitive, partial match)
+            client_lower = str(client_name).lower()
+            line_color = '#ff6d00'  # Default oranye
+            pulse_color = '#ffab40'
+            
+            for key, colors in client_colors.items():
+                if key in client_lower:
+                    line_color = colors['main']
+                    pulse_color = colors['pulse']
+                    break
+            
             if AntPath is not None:
-                AntPath(latlon, color='#ff6d00', weight=3, opacity=0.8).add_to(m)
+                # Garis animasi yang terlihat - dengan warna sesuai client
+                ant_line = AntPath(latlon, color=line_color, weight=8, opacity=0.9, 
+                                   dash_array=[12, 25], delay=800, pulse_color=pulse_color)
+                ant_line.add_to(m)
             else:
-                folium.PolyLine(locations=latlon, color="#FF6347", weight=3, opacity=0.8, tooltip=tooltip).add_to(m)
+                # Garis statis yang terlihat - dengan warna sesuai client
+                line = folium.PolyLine(locations=latlon, color=line_color, weight=8, opacity=0.9)
+                line.add_to(m)
+
+    # Tambahkan legend untuk warna operator
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 50px;
+        left: 10px;
+        z-index: 1000;
+        background: white;
+        padding: 12px 16px;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+        max-width: 180px;
+    ">
+        <div style="font-weight: bold; margin-bottom: 10px; font-size: 13px; color: #333; border-bottom: 2px solid #1a73e8; padding-bottom: 6px;">
+            📡 Legend Operator
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 6px;">
+            <div style="width: 30px; height: 6px; background: #e4002b; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🔴 Telkomsel</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 6px;">
+            <div style="width: 30px; height: 6px; background: #00529b; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🔵 XL Axiata</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 6px;">
+            <div style="width: 30px; height: 6px; background: #ffc600; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🟡 Indosat</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 6px;">
+            <div style="width: 30px; height: 6px; background: #8b1a8b; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🟣 Smartfren</span>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 30px; height: 6px; background: #ff6d00; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🟠 Lainnya</span>
+        </div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
 
     folium.LayerControl(position='topright', collapsed=True).add_to(m)
     st_folium(m, use_container_width=True, returned_objects=[])
