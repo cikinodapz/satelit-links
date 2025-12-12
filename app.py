@@ -162,8 +162,35 @@ with st.sidebar:
         format_func=lambda v: "Semua" if v is None else f"{v} — {client_options[v]}",
     )
     st.caption("Pilih client untuk memfilter link.")
+    
+    st.divider()
+    st.subheader("📍 Pengaturan Sites")
     sep_dup = st.checkbox("Pisahkan titik site berkoordinat sama", value=True)
-    sep_dist_m = st.slider("Jarak pisah (meter)", min_value=5, max_value=50, value=18, step=1, disabled=not sep_dup)
+    sep_dist_m = st.slider("Jarak pisah sites (meter)", min_value=5, max_value=50, value=18, step=1, disabled=not sep_dup)
+    
+    st.divider()
+    st.subheader("📡 Pengaturan Garis Link")
+    
+    # Slider untuk jarak antar garis yang overlapping
+    link_offset_m = st.slider(
+        "Jarak antar garis (meter)", 
+        min_value=10, 
+        max_value=100, 
+        value=25, 
+        step=5,
+        help="Jarak pemisahan garis link yang memiliki titik awal/akhir yang sama"
+    )
+    
+    # Slider untuk ketebalan garis
+    line_weight = st.slider(
+        "Ketebalan garis (px)", 
+        min_value=2, 
+        max_value=15, 
+        value=8, 
+        step=1,
+        help="Ketebalan visual garis link di peta"
+    )
+    
     # Gunakan Folium (cluster) sebagai default tanpa perlu toggle
     use_folium = True
 
@@ -785,8 +812,8 @@ def _spread_overlapping_links(df: pd.DataFrame, offset_m: float = 30.0) -> pd.Da
         result = result.drop(columns=["_link_key"])
     return result
 
-# Terapkan spread untuk link yang overlap
-links_paths = _spread_overlapping_links(links_paths, offset_m=25.0)
+# Terapkan spread untuk link yang overlap (menggunakan nilai dari sidebar)
+links_paths = _spread_overlapping_links(links_paths, offset_m=float(link_offset_m))
 
 links_paths["path"] = links_paths.apply(
     lambda r: [
@@ -901,6 +928,19 @@ if use_folium:
         BeautifyIcon = None
         AntPath = None
 
+    # Buat FeatureGroup untuk setiap operator (untuk toggle di LayerControl)
+    operator_groups = {
+        'telkomsel': folium.FeatureGroup(name='🔴 Telkomsel', show=True),
+        'xl': folium.FeatureGroup(name='🔵 XL Axiata', show=True),
+        'indosat': folium.FeatureGroup(name='🟡 Indosat', show=True),
+        'smartfren': folium.FeatureGroup(name='🟣 Smartfren', show=True),
+        'other': folium.FeatureGroup(name='🟠 Lainnya', show=True),
+    }
+    
+    # Tambahkan semua group ke peta
+    for group in operator_groups.values():
+        group.add_to(m)
+
     # Sites as styled markers (clustered if available)
     for _, row in sites_points.iterrows():
         lat_v = float(row["lat"])
@@ -967,6 +1007,17 @@ if use_folium:
             """
             popup = folium.Popup(popup_html, max_width=320)
             
+            # Buat garis highlight untuk efek hover (muncul saat mouse over)
+            # Garis ini lebih tebal dan berwarna terang sebagai indikator hover
+            highlight_line = folium.PolyLine(
+                locations=latlon,
+                color='white',  # Warna highlight
+                weight=16,  # Lebih tebal dari garis utama
+                opacity=0,  # Mulai transparan
+                className='link-highlight'
+            )
+            highlight_line.add_to(m)
+            
             # Buat garis "hitbox" transparan yang lebih tebal untuk area klik yang lebih mudah
             # Ini adalah trik untuk memperluas area interaktif tanpa mengubah tampilan visual
             hitbox_line = folium.PolyLine(
@@ -982,48 +1033,137 @@ if use_folium:
             # Mapping warna berdasarkan brand operator
             # Warna utama dan warna pulse untuk animasi
             client_colors = {
-                'telkomsel': {'main': '#e4002b', 'pulse': '#ff4d6a'},  # Merah Telkomsel
-                'xl': {'main': '#00529b', 'pulse': '#4d8fcc'},  # Biru XL
-                'indosat': {'main': '#ffc600', 'pulse': '#ffe066'},  # Kuning/Emas Indosat
-                'smartfren': {'main': '#8b1a8b', 'pulse': '#c44dc4'},  # Ungu Smartfren
+                'telkomsel': {'main': '#e4002b', 'pulse': '#ff4d6a', 'hover': '#ff6b7a'},  # Merah Telkomsel
+                'xl': {'main': '#00529b', 'pulse': '#4d8fcc', 'hover': '#66a3d9'},  # Biru XL
+                'indosat': {'main': '#ffc600', 'pulse': '#ffe066', 'hover': '#ffdb4d'},  # Kuning/Emas Indosat
+                'smartfren': {'main': '#8b1a8b', 'pulse': '#c44dc4', 'hover': '#d966d9'},  # Ungu Smartfren
             }
             
-            # Cari warna berdasarkan nama client (case insensitive, partial match)
+            # Cari warna dan target group berdasarkan nama client (case insensitive, partial match)
             client_lower = str(client_name).lower()
             line_color = '#ff6d00'  # Default oranye
             pulse_color = '#ffab40'
+            hover_color = '#ffb347'
+            target_group_key = 'other'  # Default group
             
             for key, colors in client_colors.items():
                 if key in client_lower:
                     line_color = colors['main']
                     pulse_color = colors['pulse']
+                    hover_color = colors.get('hover', colors['pulse'])
+                    target_group_key = key
                     break
+            
+            # Dapatkan target group untuk operator ini
+            target_group = operator_groups.get(target_group_key, operator_groups['other'])
             
             if AntPath is not None:
                 # Garis animasi yang terlihat - dengan warna sesuai client
-                ant_line = AntPath(latlon, color=line_color, weight=8, opacity=0.9, 
+                ant_line = AntPath(latlon, color=line_color, weight=line_weight, opacity=0.9, 
                                    dash_array=[12, 25], delay=800, pulse_color=pulse_color)
-                ant_line.add_to(m)
+                ant_line.add_to(target_group)  # Tambahkan ke group operator
             else:
                 # Garis statis yang terlihat - dengan warna sesuai client
-                line = folium.PolyLine(locations=latlon, color=line_color, weight=8, opacity=0.9)
-                line.add_to(m)
+                line = folium.PolyLine(locations=latlon, color=line_color, weight=line_weight, opacity=0.9)
+                line.add_to(target_group)  # Tambahkan ke group operator
 
-    # Tambahkan legend untuk warna operator
-    legend_html = """
-    <div id="operator-legend" style="
-        position: fixed;
-        bottom: 50px;
-        left: 10px;
-        z-index: 9999;
-        background: white;
-        padding: 12px 16px;
-        border-radius: 10px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-        font-family: Arial, sans-serif;
-        font-size: 12px;
-        max-width: 180px;
-    ">
+    # Tambahkan CSS dan JavaScript untuk efek hover pada garis link
+    hover_effect_code = """
+    <style>
+        /* Style untuk efek hover pada garis link */
+        .leaflet-interactive:hover {
+            stroke-opacity: 1 !important;
+        }
+        .link-hover-active {
+            stroke: white !important;
+            stroke-width: 14px !important;
+            stroke-opacity: 0.8 !important;
+            filter: drop-shadow(0 0 8px rgba(255,255,255,0.9));
+        }
+    </style>
+    <script>
+    (function() {
+        function setupHoverEffects() {
+            // Dapatkan semua polyline di peta
+            var polylines = document.querySelectorAll('.leaflet-interactive');
+            
+            polylines.forEach(function(polyline) {
+                // Simpan style asli
+                var originalStroke = polyline.getAttribute('stroke');
+                var originalStrokeWidth = polyline.getAttribute('stroke-width');
+                var originalStrokeOpacity = polyline.getAttribute('stroke-opacity');
+                
+                // Event mouseenter - tampilkan efek hover
+                polyline.addEventListener('mouseenter', function(e) {
+                    // Tambahkan efek glow dan bawa ke depan
+                    this.style.filter = 'drop-shadow(0 0 6px rgba(255,255,255,0.9)) drop-shadow(0 0 10px rgba(255,255,255,0.7))';
+                    this.style.strokeWidth = '12px';
+                    this.style.strokeOpacity = '1';
+                    
+                    // Bawa element ke depan (z-index trick for SVG)
+                    this.parentNode.appendChild(this);
+                });
+                
+                // Event mouseleave - kembalikan ke normal
+                polyline.addEventListener('mouseleave', function(e) {
+                    this.style.filter = '';
+                    this.style.strokeWidth = originalStrokeWidth;
+                    this.style.strokeOpacity = originalStrokeOpacity;
+                });
+            });
+        }
+        
+        // Jalankan setelah peta dimuat
+        setTimeout(setupHoverEffects, 1000);
+        setTimeout(setupHoverEffects, 2000);
+        setTimeout(setupHoverEffects, 3000);
+    })();
+    </script>
+    """
+    m.get_root().html.add_child(folium.Element(hover_effect_code))
+
+    # Tambahkan legend dan info filter di dalam peta
+    filter_legend_html = """
+    <style>
+        #operator-legend {
+            position: fixed;
+            bottom: 50px;
+            left: 10px;
+            z-index: 9999;
+            background: white;
+            padding: 12px 16px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            max-width: 200px;
+        }
+        #filter-info {
+            position: fixed;
+            top: 10px;
+            left: 60px;
+            z-index: 9999;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 16px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+        }
+    </style>
+    
+    <!-- Info filter di atas -->
+    <div id="filter-info">
+        <div style="font-weight: bold; margin-bottom: 5px;">🎛️ Filter Operator</div>
+        <div style="font-size: 11px; opacity: 0.9;">
+            Gunakan menu <b>Layers</b> di kanan atas ↗️<br>
+            untuk show/hide operator
+        </div>
+    </div>
+    
+    <!-- Legend di bawah -->
+    <div id="operator-legend">
         <div style="font-weight: bold; margin-bottom: 10px; font-size: 13px; color: #333; border-bottom: 2px solid #1a73e8; padding-bottom: 6px;">
             📡 Legend Operator
         </div>
@@ -1049,29 +1189,11 @@ if use_folium:
         </div>
     </div>
     """
-    m.get_root().html.add_child(folium.Element(legend_html))
+    m.get_root().html.add_child(folium.Element(filter_legend_html))
 
-    folium.LayerControl(position='topright', collapsed=True).add_to(m)
+    folium.LayerControl(position='topright', collapsed=False).add_to(m)
     st_folium(m, use_container_width=True, returned_objects=[])
-    
-    # Tampilkan legend juga sebagai Streamlit component (untuk referensi saat fullscreen)
-    with st.expander("📡 Legend Warna Operator", expanded=False):
-        legend_cols = st.columns(5)
-        with legend_cols[0]:
-            st.markdown("🔴 **Telkomsel**")
-            st.markdown('<div style="width:50px;height:8px;background:#e4002b;border-radius:4px;"></div>', unsafe_allow_html=True)
-        with legend_cols[1]:
-            st.markdown("🔵 **XL Axiata**")
-            st.markdown('<div style="width:50px;height:8px;background:#00529b;border-radius:4px;"></div>', unsafe_allow_html=True)
-        with legend_cols[2]:
-            st.markdown("🟡 **Indosat**")
-            st.markdown('<div style="width:50px;height:8px;background:#ffc600;border-radius:4px;"></div>', unsafe_allow_html=True)
-        with legend_cols[3]:
-            st.markdown("🟣 **Smartfren**")
-            st.markdown('<div style="width:50px;height:8px;background:#8b1a8b;border-radius:4px;"></div>', unsafe_allow_html=True)
-        with legend_cols[4]:
-            st.markdown("🟠 **Lainnya**")
-            st.markdown('<div style="width:50px;height:8px;background:#ff6d00;border-radius:4px;"></div>', unsafe_allow_html=True)
+
 else:
     import pydeck as pdk
 
