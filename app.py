@@ -672,6 +672,187 @@ with st.expander("Kelola Links", expanded=False):
                 if pick_link is not None:
                     dlg_delete_links([int(pick_link)])
 
+# -------------------------------
+# Import Data dari CSV
+# -------------------------------
+with st.expander("📥 Import Data dari CSV", expanded=False):
+    st.subheader("Import Data dari File CSV")
+    st.caption("Upload file CSV untuk import data clients, sites, dan links sekaligus.")
+    
+    # Kolom yang diharapkan dari CSV
+    st.info("""
+    **Format CSV yang didukung** (seperti format dummies.csv):
+    - `CLNT_NAME` → Client name
+    - `STN_NAME` → Site name (stasiun asal)
+    - `STN_ADDR` → Site address
+    - `LAT_DEC`, `LONG_DEC` → Koordinat site asal
+    - `STASIUN_LAWAN` → Site tujuan
+    - `TO_LAT_DEC`, `TO_LONG_DEC` → Koordinat site tujuan
+    - `APPL_ID`, `FREQ`, `FREQ_PAIR`, `BWIDTH`, `EQ_MDL` → Data link
+    """)
+    
+    uploaded_file = st.file_uploader("Pilih file CSV", type=["csv"], key="csv_uploader")
+    
+    if uploaded_file is not None:
+        try:
+            # Baca CSV
+            import_df = pd.read_csv(uploaded_file)
+            st.success(f"File berhasil dibaca: {len(import_df)} baris data")
+            
+            # Tampilkan preview
+            st.write("**Preview Data (5 baris pertama):**")
+            st.dataframe(import_df.head(), use_container_width=True, height=200)
+            
+            # Cek kolom yang diperlukan
+            required_cols = ["CLNT_NAME", "STN_NAME", "LAT_DEC", "LONG_DEC", "STASIUN_LAWAN", "TO_LAT_DEC", "TO_LONG_DEC"]
+            missing_cols = [c for c in required_cols if c not in import_df.columns]
+            
+            if missing_cols:
+                st.error(f"Kolom yang kurang: {', '.join(missing_cols)}")
+            else:
+                st.success("✅ Semua kolom yang diperlukan tersedia!")
+                
+                # Ekstrak data unik
+                # 1. Clients
+                unique_clients = import_df["CLNT_NAME"].dropna().unique().tolist()
+                st.write(f"**Clients ditemukan ({len(unique_clients)}):** {', '.join(unique_clients[:5])}{'...' if len(unique_clients) > 5 else ''}")
+                
+                # 2. Sites (gabungan dari STN_NAME dan STASIUN_LAWAN)
+                sites_from = import_df[["STN_NAME", "STN_ADDR", "LAT_DEC", "LONG_DEC"]].copy()
+                sites_from.columns = ["site_name", "site_address", "lat", "lon"]
+                
+                sites_to = import_df[["STASIUN_LAWAN", "TO_LAT_DEC", "TO_LONG_DEC"]].copy()
+                sites_to.columns = ["site_name", "lat", "lon"]
+                sites_to["site_address"] = None
+                sites_to = sites_to[["site_name", "site_address", "lat", "lon"]]
+                
+                all_sites = pd.concat([sites_from, sites_to], ignore_index=True).drop_duplicates(subset=["site_name"])
+                st.write(f"**Sites ditemukan ({len(all_sites)}):** {', '.join(all_sites['site_name'].head(5).tolist())}{'...' if len(all_sites) > 5 else ''}")
+                
+                # 3. Links
+                st.write(f"**Links ditemukan:** {len(import_df)} koneksi")
+                
+                st.divider()
+                
+                col_import, col_cancel = st.columns(2)
+                with col_cancel:
+                    if st.button("Batal", use_container_width=True, key="csv_import_cancel"):
+                        st.rerun()
+                
+                with col_import:
+                    if st.button("🚀 Import Semua Data", type="primary", use_container_width=True, key="csv_import_confirm"):
+                        progress = st.progress(0, text="Memulai import...")
+                        
+                        try:
+                            # Step 1: Import Clients
+                            progress.progress(10, text="Mengimport clients...")
+                            client_id_map = {}  # Mapping nama client ke ID
+                            
+                            for cname in unique_clients:
+                                # Cek apakah sudah ada
+                                existing = run_sql(
+                                    "SELECT client_id FROM clients WHERE client_name = %s",
+                                    (cname,), fetch="one"
+                                )
+                                if existing:
+                                    client_id_map[cname] = existing["client_id"]
+                                else:
+                                    # Insert baru
+                                    reseed_clients_id_sequence()
+                                    run_sql(
+                                        "INSERT INTO clients(client_name) VALUES (%s)",
+                                        (cname,)
+                                    )
+                                    new_client = run_sql(
+                                        "SELECT client_id FROM clients WHERE client_name = %s",
+                                        (cname,), fetch="one"
+                                    )
+                                    if new_client:
+                                        client_id_map[cname] = new_client["client_id"]
+                            
+                            st.write(f"✅ Clients: {len(client_id_map)} imported/found")
+                            
+                            # Step 2: Import Sites
+                            progress.progress(40, text="Mengimport sites...")
+                            sites_imported = 0
+                            sites_skipped = 0
+                            
+                            for _, site_row in all_sites.iterrows():
+                                site_id = str(site_row["site_name"]).strip()
+                                site_name = str(site_row["site_name"]).strip()
+                                site_addr = str(site_row["site_address"]) if pd.notna(site_row["site_address"]) else None
+                                lat = float(site_row["lat"]) if pd.notna(site_row["lat"]) else None
+                                lon = float(site_row["lon"]) if pd.notna(site_row["lon"]) else None
+                                
+                                # Cek apakah sudah ada
+                                existing = run_sql(
+                                    "SELECT site_id FROM sites WHERE site_id = %s",
+                                    (site_id,), fetch="one"
+                                )
+                                if existing:
+                                    sites_skipped += 1
+                                else:
+                                    run_sql(
+                                        "INSERT INTO sites(site_id, site_name, site_address, lat_dec, long_dec) VALUES (%s, %s, %s, %s, %s)",
+                                        (site_id, site_name, site_addr, lat, lon)
+                                    )
+                                    sites_imported += 1
+                            
+                            st.write(f"✅ Sites: {sites_imported} imported, {sites_skipped} skipped (sudah ada)")
+                            
+                            # Step 3: Import Links
+                            progress.progress(70, text="Mengimport links...")
+                            links_imported = 0
+                            links_skipped = 0
+                            
+                            for _, link_row in import_df.iterrows():
+                                appl_id = str(link_row.get("APPL_ID", "")) if pd.notna(link_row.get("APPL_ID")) else None
+                                client_name = str(link_row["CLNT_NAME"]) if pd.notna(link_row["CLNT_NAME"]) else None
+                                site_from = str(link_row["STN_NAME"]).strip() if pd.notna(link_row["STN_NAME"]) else None
+                                site_to = str(link_row["STASIUN_LAWAN"]).strip() if pd.notna(link_row["STASIUN_LAWAN"]) else None
+                                freq = int(link_row["FREQ"]) if pd.notna(link_row.get("FREQ")) else None
+                                freq_pair = int(link_row["FREQ_PAIR"]) if pd.notna(link_row.get("FREQ_PAIR")) else None
+                                bandwidth = int(link_row["BWIDTH"]) if pd.notna(link_row.get("BWIDTH")) else None
+                                model = str(link_row["EQ_MDL"]) if pd.notna(link_row.get("EQ_MDL")) else None
+                                
+                                client_id = client_id_map.get(client_name) if client_name else None
+                                
+                                if not site_from or not site_to or not client_id:
+                                    links_skipped += 1
+                                    continue
+                                
+                                # Cek apakah link sudah ada (berdasarkan appl_id + site_from + site_to)
+                                existing = run_sql(
+                                    "SELECT link_id FROM links WHERE appl_id = %s AND site_from = %s AND site_to = %s",
+                                    (appl_id, site_from, site_to), fetch="one"
+                                )
+                                if existing:
+                                    links_skipped += 1
+                                else:
+                                    reseed_links_id_sequence()
+                                    run_sql(
+                                        "INSERT INTO links(appl_id, client_id, site_from, site_to, freq, freq_pair, bandwidth, model) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                                        (appl_id, client_id, site_from, site_to, freq, freq_pair, bandwidth, model)
+                                    )
+                                    links_imported += 1
+                            
+                            st.write(f"✅ Links: {links_imported} imported, {links_skipped} skipped")
+                            
+                            progress.progress(100, text="Selesai!")
+                            st.success("🎉 Import selesai! Data berhasil dimasukkan ke database.")
+                            st.balloons()
+                            
+                            # Refresh data
+                            load_data.clear()
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"❌ Gagal import: {e}")
+                            st.exception(e)
+                
+        except Exception as e:
+            st.error(f"Gagal membaca file CSV: {e}")
+
 if selected_client is not None and not links_df.empty:
     links_df = links_df[links_df["client_id"] == selected_client]
 
