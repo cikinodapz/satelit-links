@@ -121,12 +121,18 @@ def reseed_links_id_sequence():
         pass
 
 with st.sidebar:
-    if st.button("Init/Terapkan Schema DB"):
-        try:
-            run_sql(SCHEMA_SQL)
-            st.success("Schema berhasil diterapkan/ada.")
-        except Exception as e:
-            st.error(f"Gagal membuat schema: {e}")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Refresh Data", use_container_width=True, help="Refresh data dari database (gunakan setelah mengubah data)"):
+            st.cache_data.clear()
+            st.rerun()
+    with col2:
+        if st.button("⚙️ Init Schema", use_container_width=True):
+            try:
+                run_sql(SCHEMA_SQL)
+                st.success("Schema berhasil diterapkan/ada.")
+            except Exception as e:
+                st.error(f"Gagal membuat schema: {e}")
 
 @st.cache_data(show_spinner=False)
 def load_data(_params):
@@ -1110,12 +1116,12 @@ if use_folium:
         AntPath = None
 
     # Buat FeatureGroup untuk setiap operator (untuk toggle di LayerControl)
+    # Hanya 4 operator: Telkomsel, Telkom, IOH, dan XLSmart
     operator_groups = {
         'telkomsel': folium.FeatureGroup(name='🔴 Telkomsel', show=True),
-        'xl': folium.FeatureGroup(name='🔵 XL Axiata', show=True),
-        'indosat': folium.FeatureGroup(name='🟡 Indosat', show=True),
-        'smartfren': folium.FeatureGroup(name='🟣 Smartfren', show=True),
-        'other': folium.FeatureGroup(name='🟠 Lainnya', show=True),
+        'telkom': folium.FeatureGroup(name='🔵 Telkom', show=True),
+        'ioh': folium.FeatureGroup(name='🟡 IOH', show=True),
+        'xlsmart': folium.FeatureGroup(name='🟣 XLSmart', show=True),
     }
     
     # Tambahkan semua group ke peta
@@ -1213,30 +1219,39 @@ if use_folium:
             
             # Mapping warna berdasarkan brand operator
             # Warna utama dan warna pulse untuk animasi
+            # Hanya 4 operator: Telkomsel, Telkom, IOH, XLSmart
             client_colors = {
                 'telkomsel': {'main': '#e4002b', 'pulse': '#ff4d6a', 'hover': '#ff6b7a'},  # Merah Telkomsel
-                'xl': {'main': '#00529b', 'pulse': '#4d8fcc', 'hover': '#66a3d9'},  # Biru XL
-                'indosat': {'main': '#ffc600', 'pulse': '#ffe066', 'hover': '#ffdb4d'},  # Kuning/Emas Indosat
-                'smartfren': {'main': '#8b1a8b', 'pulse': '#c44dc4', 'hover': '#d966d9'},  # Ungu Smartfren
+                'telkom': {'main': '#00529b', 'pulse': '#4d8fcc', 'hover': '#66a3d9'},  # Biru Telkom
+                'ioh': {'main': '#ffc600', 'pulse': '#ffe066', 'hover': '#ffdb4d'},  # Kuning/Emas IOH
+                'xlsmart': {'main': '#8b1a8b', 'pulse': '#c44dc4', 'hover': '#d966d9'},  # Ungu XLSmart
             }
             
             # Cari warna dan target group berdasarkan nama client (case insensitive, partial match)
             client_lower = str(client_name).lower()
-            line_color = '#ff6d00'  # Default oranye
-            pulse_color = '#ffab40'
-            hover_color = '#ffb347'
-            target_group_key = 'other'  # Default group
             
-            for key, colors in client_colors.items():
-                if key in client_lower:
-                    line_color = colors['main']
-                    pulse_color = colors['pulse']
-                    hover_color = colors.get('hover', colors['pulse'])
-                    target_group_key = key
-                    break
+            # Deteksi operator berdasarkan nama client
+            # Urutan penting: telkomsel harus dicek duluan sebelum telkom
+            if 'telkomsel' in client_lower:
+                target_group_key = 'telkomsel'
+            elif 'telkom' in client_lower:
+                target_group_key = 'telkom'
+            elif 'ioh' in client_lower or 'indosat' in client_lower or 'ooredoo' in client_lower or 'hutchison' in client_lower:
+                target_group_key = 'ioh'
+            elif 'xl' in client_lower or 'smart' in client_lower or 'smartfren' in client_lower or 'axis' in client_lower:
+                target_group_key = 'xlsmart'
+            else:
+                # Default ke telkom untuk operator yang tidak dikenal
+                target_group_key = 'telkom'
+            
+            # Ambil warna sesuai group
+            colors = client_colors.get(target_group_key, client_colors['telkom'])
+            line_color = colors['main']
+            pulse_color = colors['pulse']
+            hover_color = colors.get('hover', colors['pulse'])
             
             # Dapatkan target group untuk operator ini
-            target_group = operator_groups.get(target_group_key, operator_groups['other'])
+            target_group = operator_groups.get(target_group_key, operator_groups['telkom'])
             
             if AntPath is not None:
                 # Garis animasi yang terlihat - dengan warna sesuai client
@@ -1354,19 +1369,15 @@ if use_folium:
         </div>
         <div style="display: flex; align-items: center; margin-bottom: 6px;">
             <div style="width: 30px; height: 6px; background: #00529b; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🔵 XL Axiata</span>
+            <span style="color: #333;">🔵 Telkom</span>
         </div>
         <div style="display: flex; align-items: center; margin-bottom: 6px;">
             <div style="width: 30px; height: 6px; background: #ffc600; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🟡 Indosat</span>
-        </div>
-        <div style="display: flex; align-items: center; margin-bottom: 6px;">
-            <div style="width: 30px; height: 6px; background: #8b1a8b; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🟣 Smartfren</span>
+            <span style="color: #333;">🟡 IOH</span>
         </div>
         <div style="display: flex; align-items: center;">
-            <div style="width: 30px; height: 6px; background: #ff6d00; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🟠 Lainnya</span>
+            <div style="width: 30px; height: 6px; background: #8b1a8b; border-radius: 3px; margin-right: 10px;"></div>
+            <span style="color: #333;">🟣 XLSmart</span>
         </div>
     </div>
     """
