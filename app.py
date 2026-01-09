@@ -918,9 +918,9 @@ links_paths = links_merge.dropna(subset=["from_lat", "from_lon", "to_lat", "to_l
 
 def _spread_overlapping_links(df: pd.DataFrame, offset_m: float = 30.0) -> pd.DataFrame:
     """
-    Sebar link yang punya koordinat from-to identik dengan offset tegak lurus,
-    sehingga setiap link tampil sebagai garis terpisah.
-    offset_m: jarak offset dalam meter antar garis.
+    Untuk link yang punya koordinat from-to identik, buat kurva Bezier yang berbeda
+    sehingga setiap link tampil sebagai garis melengkung yang bertemu di titik yang sama.
+    offset_m: jarak control point dari garis lurus dalam meter.
     """
     if df.empty:
         return df
@@ -932,67 +932,76 @@ def _spread_overlapping_links(df: pd.DataFrame, offset_m: float = 30.0) -> pd.Da
         axis=1
     )
     
-    # Group by link_key dan hitung offset untuk masing-masing
+    # Group by link_key dan hitung kurva untuk masing-masing
     grouped = df.groupby("_link_key", as_index=False)
     
     new_rows = []
     for key, group in grouped:
         n = len(group)
-        if n == 1:
-            # Single link, tidak perlu offset
-            for _, r in group.iterrows():
-                rr = r.to_dict()
-                rr["offset_from_lat"] = r["from_lat"]
-                rr["offset_from_lon"] = r["from_lon"]
-                rr["offset_to_lat"] = r["to_lat"]
-                rr["offset_to_lon"] = r["to_lon"]
-                new_rows.append(rr)
-        else:
-            # Multiple links dengan koordinat sama, beri offset tegak lurus
-            first_row = group.iloc[0]
-            lat1, lon1 = float(first_row["from_lat"]), float(first_row["from_lon"])
-            lat2, lon2 = float(first_row["to_lat"]), float(first_row["to_lon"])
+        first_row = group.iloc[0]
+        lat1, lon1 = float(first_row["from_lat"]), float(first_row["from_lon"])
+        lat2, lon2 = float(first_row["to_lat"]), float(first_row["to_lon"])
+        
+        # Konversi ke meter untuk perhitungan
+        lat_mid = (lat1 + lat2) / 2
+        lat_to_m = 111320.0
+        lon_to_m = 111320.0 * max(0.15, math.cos(math.radians(lat_mid)))
+        
+        # Hitung vektor arah dari from ke to
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        # Panjang vektor dalam meter
+        length_m = math.sqrt((dlat * lat_to_m)**2 + (dlon * lon_to_m)**2)
+        if length_m < 1:
+            length_m = 1
+        
+        # Unit vector perpendicular (tegak lurus) untuk control point
+        perp_lat = -dlon * lon_to_m / length_m
+        perp_lon = dlat * lat_to_m / length_m
+        perp_lat_deg = perp_lat / lat_to_m
+        perp_lon_deg = perp_lon / lon_to_m
+        
+        for i, (_, r) in enumerate(group.iterrows()):
+            rr = r.to_dict()
             
-            # Hitung vektor arah dari from ke to
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
+            # Titik awal dan akhir tetap sama (tidak di-offset)
+            rr["offset_from_lat"] = lat1
+            rr["offset_from_lon"] = lon1
+            rr["offset_to_lat"] = lat2
+            rr["offset_to_lon"] = lon2
             
-            # Vektor perpendicular (tegak lurus)
-            # Normalisasi dengan konversi ke meter (approx)
-            lat_mid = (lat1 + lat2) / 2
-            lat_to_m = 111320.0  # meter per derajat latitude
-            lon_to_m = 111320.0 * max(0.15, math.cos(math.radians(lat_mid)))  # meter per derajat longitude
-            
-            # Panjang vektor dalam meter
-            length_m = math.sqrt((dlat * lat_to_m)**2 + (dlon * lon_to_m)**2)
-            if length_m < 1:
-                length_m = 1  # avoid division by zero
-            
-            # Unit vector perpendicular (rotasi 90 derajat)
-            # Original direction: (dlat, dlon), perpendicular: (-dlon, dlat) normalized
-            perp_lat = -dlon * lon_to_m / length_m  # in "lat-meter" space
-            perp_lon = dlat * lat_to_m / length_m   # in "lon-meter" space
-            
-            # Konversi kembali ke derajat
-            perp_lat_deg = perp_lat / lat_to_m
-            perp_lon_deg = perp_lon / lon_to_m
-            
-            # Sebar link secara simetris
-            for i, (_, r) in enumerate(group.iterrows()):
+            if n == 1:
+                # Single link, tidak perlu kurva
+                rr["curve_offset"] = 0
+                rr["curve_points"] = None
+            else:
+                # Multiple links, buat kurva dengan control point berbeda
                 # Offset dari tengah: -((n-1)/2), ..., 0, ..., ((n-1)/2)
                 offset_idx = i - (n - 1) / 2.0
-                offset_distance = offset_idx * offset_m
+                curve_distance = offset_idx * offset_m * 1.5  # Lebih besar agar kurva terlihat
                 
-                # Terapkan offset
-                off_lat = offset_distance * perp_lat_deg
-                off_lon = offset_distance * perp_lon_deg
+                # Hitung control point di tengah garis
+                mid_lat = (lat1 + lat2) / 2 + curve_distance * perp_lat_deg
+                mid_lon = (lon1 + lon2) / 2 + curve_distance * perp_lon_deg
                 
-                rr = r.to_dict()
-                rr["offset_from_lat"] = lat1 + off_lat
-                rr["offset_from_lon"] = lon1 + off_lon
-                rr["offset_to_lat"] = lat2 + off_lat
-                rr["offset_to_lon"] = lon2 + off_lon
-                new_rows.append(rr)
+                rr["curve_offset"] = curve_distance
+                # Simpan control points untuk kurva quadratic Bezier
+                rr["ctrl_lat"] = mid_lat
+                rr["ctrl_lon"] = mid_lon
+                
+                # Generate multiple points untuk simulasi kurva
+                num_points = 12
+                curve_pts = []
+                for t in range(num_points + 1):
+                    t_val = t / num_points
+                    # Quadratic Bezier: B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
+                    b_lat = (1-t_val)**2 * lat1 + 2*(1-t_val)*t_val * mid_lat + t_val**2 * lat2
+                    b_lon = (1-t_val)**2 * lon1 + 2*(1-t_val)*t_val * mid_lon + t_val**2 * lon2
+                    curve_pts.append([b_lon, b_lat])  # [lon, lat] for path
+                rr["curve_points"] = curve_pts
+            
+            new_rows.append(rr)
     
     result = pd.DataFrame(new_rows)
     if "_link_key" in result.columns:
@@ -1003,7 +1012,7 @@ def _spread_overlapping_links(df: pd.DataFrame, offset_m: float = 30.0) -> pd.Da
 links_paths = _spread_overlapping_links(links_paths, offset_m=float(link_offset_m))
 
 links_paths["path"] = links_paths.apply(
-    lambda r: [
+    lambda r: r["curve_points"] if r.get("curve_points") is not None else [
         [float(r["offset_from_lon"]), float(r["offset_from_lat"])],
         [float(r["offset_to_lon"]), float(r["offset_to_lat"])],
     ],
@@ -1128,27 +1137,29 @@ if use_folium:
     for group in operator_groups.values():
         group.add_to(m)
 
-    # Sites as styled markers (clustered if available)
+    # Sites as styled markers with Tower Icons (clustered if available)
     for _, row in sites_points.iterrows():
         lat_v = float(row["lat"])
         lon_v = float(row["lon"])
-        tooltip = f"{row['name']} ({row['id']})"
+        tooltip = f"📡 {row['name']} ({row['id']})"
         popup = folium.Popup(
+            f"<div style='text-align:center;'><span style='font-size:24px;'>📡</span></div>"
             f"<b>{row['name']}</b><br>ID: {row['id']}<br>Lat: {lat_v:.6f}<br>Lon: {lon_v:.6f}",
             max_width=260,
         )
-        if BeautifyIcon is not None:
-            icon = BeautifyIcon(
-                icon_shape='marker',
-                border_color='#FFFFFF',
-                border_width=2,
-                text_color='#FFFFFF',
-                background_color='#1a73e8',  # Google-ish blue
-                inner_icon_style='font-size:12px;padding-top:2px;'
-            )
-            marker = folium.Marker(location=[lat_v, lon_v], tooltip=tooltip, icon=icon)
-        else:
-            marker = folium.CircleMarker(location=[lat_v, lon_v], radius=6, color='#1a73e8', weight=2, fill=True, fill_opacity=0.9, tooltip=tooltip)
+        # Custom tower icon using DivIcon
+        tower_icon = folium.DivIcon(
+            html="""
+            <div style="
+                font-size: 24px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.5), -1px -1px 2px rgba(255,255,255,0.8);
+                filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+            ">📡</div>
+            """,
+            icon_size=(30, 30),
+            icon_anchor=(15, 15),
+        )
+        marker = folium.Marker(location=[lat_v, lon_v], tooltip=tooltip, icon=tower_icon)
         marker.add_child(popup)
         (mc or m).add_child(marker)
 
@@ -1156,7 +1167,8 @@ if use_folium:
     if not links_df.empty:
         for _, r in links_paths.iterrows():
             coords = r["path"]
-            latlon = [[coords[0][1], coords[0][0]], [coords[1][1], coords[1][0]]]
+            # Convert all points in path from [lon, lat] to [lat, lon] for Folium
+            latlon = [[pt[1], pt[0]] for pt in coords]
             
             # Ambil informasi link
             appl_id = r.get('appl_id', '-')
@@ -1318,7 +1330,7 @@ if use_folium:
     """
     m.get_root().html.add_child(folium.Element(hover_effect_code))
 
-    # Tambahkan legend dan info filter di dalam peta
+    # Tambahkan legend di dalam peta
     filter_legend_html = """
     <style>
         #operator-legend {
@@ -1334,29 +1346,7 @@ if use_folium:
             font-size: 12px;
             max-width: 200px;
         }
-        #filter-info {
-            position: fixed;
-            top: 10px;
-            left: 60px;
-            z-index: 9999;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 10px 16px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.25);
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-        }
     </style>
-    
-    <!-- Info filter di atas -->
-    <div id="filter-info">
-        <div style="font-weight: bold; margin-bottom: 5px;">🎛️ Filter Operator</div>
-        <div style="font-size: 11px; opacity: 0.9;">
-            Gunakan menu <b>Layers</b> di kanan atas ↗️<br>
-            untuk show/hide operator
-        </div>
-    </div>
     
     <!-- Legend di bawah -->
     <div id="operator-legend">
