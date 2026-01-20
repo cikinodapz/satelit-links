@@ -1141,23 +1141,62 @@ if use_folium:
     for _, row in sites_points.iterrows():
         lat_v = float(row["lat"])
         lon_v = float(row["lon"])
-        tooltip = f"📡 {row['name']} ({row['id']})"
+        tooltip = f"� {row['name']} ({row['id']})"
         popup = folium.Popup(
-            f"<div style='text-align:center;'><span style='font-size:24px;'>📡</span></div>"
-            f"<b>{row['name']}</b><br>ID: {row['id']}<br>Lat: {lat_v:.6f}<br>Lon: {lon_v:.6f}",
-            max_width=260,
+            f"<div style='font-family: Segoe UI, Arial; padding: 4px;'>"
+            f"<b style='font-size: 14px; color: #2c3e50;'>{row['name']}</b><br>"
+            f"<span style='color: #6c757d; font-size: 12px;'>ID: {row['id']}</span><br>"
+            f"<span style='color: #6c757d; font-size: 11px;'>📍 {lat_v:.6f}, {lon_v:.6f}</span></div>",
+            max_width=280,
         )
-        # Custom tower icon using DivIcon
+        # Custom SVG tower icon with signal waves on both sides (matching reference design)
         tower_icon = folium.DivIcon(
             html="""
-            <div style="
-                font-size: 24px;
-                text-shadow: 2px 2px 4px rgba(0,0,0,0.5), -1px -1px 2px rgba(255,255,255,0.8);
-                filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
-            ">📡</div>
+            <div style="filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.3));">
+                <svg width="40" height="48" viewBox="0 0 40 48" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Left signal waves -->
+                    <path d="M10 6 Q6 10, 8 14" stroke="#4a5568" stroke-width="2.5" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite"/>
+                    </path>
+                    <path d="M7 4 Q2 10, 5 16" stroke="#4a5568" stroke-width="2" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="0.8;0.3;0.8" dur="1.5s" begin="0.2s" repeatCount="indefinite"/>
+                    </path>
+                    <path d="M4 2 Q-2 10, 2 18" stroke="#4a5568" stroke-width="1.5" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="0.6;0.2;0.6" dur="1.5s" begin="0.4s" repeatCount="indefinite"/>
+                    </path>
+                    
+                    <!-- Right signal waves -->
+                    <path d="M30 6 Q34 10, 32 14" stroke="#4a5568" stroke-width="2.5" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite"/>
+                    </path>
+                    <path d="M33 4 Q38 10, 35 16" stroke="#4a5568" stroke-width="2" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="0.8;0.3;0.8" dur="1.5s" begin="0.2s" repeatCount="indefinite"/>
+                    </path>
+                    <path d="M36 2 Q42 10, 38 18" stroke="#4a5568" stroke-width="1.5" fill="none" stroke-linecap="round">
+                        <animate attributeName="opacity" values="0.6;0.2;0.6" dur="1.5s" begin="0.4s" repeatCount="indefinite"/>
+                    </path>
+                    
+                    <!-- Tower structure - Blue flat design -->
+                    <!-- Left leg -->
+                    <line x1="20" y1="16" x2="10" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
+                    <!-- Right leg -->
+                    <line x1="20" y1="16" x2="30" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
+                    <!-- Center pole -->
+                    <line x1="20" y1="10" x2="20" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
+                    
+                    <!-- X-shaped cross beams -->
+                    <line x1="13" y1="26" x2="27" y2="34" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="27" y1="26" x2="13" y2="34" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="15" y1="36" x2="25" y2="42" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="25" y1="36" x2="15" y2="42" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
+                    
+                    <!-- Antenna circle at top -->
+                    <circle cx="20" cy="10" r="5" fill="#3182ce"/>
+                </svg>
+            </div>
             """,
-            icon_size=(30, 30),
-            icon_anchor=(15, 15),
+            icon_size=(40, 48),
+            icon_anchor=(20, 48),
         )
         marker = folium.Marker(location=[lat_v, lon_v], tooltip=tooltip, icon=tower_icon)
         marker.add_child(popup)
@@ -1183,28 +1222,69 @@ if use_folium:
             # Tooltip singkat untuk hover (dengan nama site dan client)
             tooltip_text = f"🏢 <b>{client_name}</b><br>📡 {site_from} → {site_to}<br>Freq: {freq}/{freq_pair} MHz | BW: {bandwidth} kHz"
             
-            # Popup lengkap untuk klik
+            # Popup lengkap untuk klik - menampilkan info bidirectional
             popup_html = f"""
-            <div style="font-family: Arial, sans-serif; min-width: 250px;">
-                <h4 style="margin: 0 0 8px 0; color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px;">
-                    📡 Link Info
-                </h4>
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px;">
-                    <div style="font-size: 11px; opacity: 0.9;">🏢 Client</div>
-                    <div style="font-size: 14px; font-weight: bold;">{client_name}</div>
+            <div style="font-family: 'Segoe UI', Arial, sans-serif; background: #fff; border-radius: 8px; max-width: 400px;">
+                <!-- Header -->
+                <div style="background: #2c3e50; color: white; padding: 10px 14px; border-radius: 8px 8px 0 0;">
+                    <div style="font-size: 15px; font-weight: 600;">📡 Link Information</div>
+                    <div style="font-size: 12px; opacity: 0.85; margin-top: 2px; word-wrap: break-word;">{client_name}</div>
                 </div>
-                <table style="width: 100%; font-size: 12px; border-collapse: collapse;">
-                    <tr><td style="padding: 4px 0; color: #666;"><b>Application ID:</b></td><td style="padding: 4px 0;">{appl_id}</td></tr>
-                    <tr style="background: #f0f7ff;"><td style="padding: 4px 0; color: #666;"><b>📍 From:</b></td><td style="padding: 4px 0;"><b>{site_from}</b></td></tr>
-                    <tr style="background: #f0f7ff;"><td style="padding: 4px 0; color: #666;"><b>📍 To:</b></td><td style="padding: 4px 0;"><b>{site_to}</b></td></tr>
-                    <tr><td style="padding: 4px 0; color: #666;"><b>Frequency:</b></td><td style="padding: 4px 0;"><b style="color: #ff6d00;">{freq} MHz</b></td></tr>
-                    <tr><td style="padding: 4px 0; color: #666;"><b>Freq Pair:</b></td><td style="padding: 4px 0;"><b style="color: #ff6d00;">{freq_pair} MHz</b></td></tr>
-                    <tr style="background: #f5f5f5;"><td style="padding: 4px 0; color: #666;"><b>Bandwidth:</b></td><td style="padding: 4px 0;"><b style="color: #4caf50;">{bandwidth} kHz</b></td></tr>
-                    <tr><td style="padding: 4px 0; color: #666;"><b>Model:</b></td><td style="padding: 4px 0;">{model}</td></tr>
-                </table>
+                
+                <!-- Info Umum -->
+                <div style="padding: 12px 14px; border-bottom: 1px solid #e9ecef;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px; gap: 12px;">
+                        <span style="color: #6c757d; font-size: 11px; white-space: nowrap;">App ID</span>
+                        <span style="font-size: 12px; font-weight: 500; text-align: right; word-break: break-all;">{appl_id}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: #6c757d; font-size: 11px;">Bandwidth</span>
+                        <span style="font-size: 12px; font-weight: 500;">{bandwidth} kHz</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="color: #6c757d; font-size: 11px;">Model</span>
+                        <span style="font-size: 12px; font-weight: 500; text-align: right; word-break: break-word; max-width: 200px;">{model}</span>
+                    </div>
+                </div>
+                
+                <!-- Arah 1 -->
+                <div style="padding: 10px 14px; border-bottom: 1px solid #e9ecef;">
+                    <div style="display: flex; align-items: flex-start; margin-bottom: 8px; gap: 8px;">
+                        <span style="background: #28a745; color: white; font-size: 10px; padding: 2px 6px; border-radius: 3px; flex-shrink: 0;">→</span>
+                        <span style="font-size: 12px; font-weight: 600; color: #212529; word-wrap: break-word; line-height: 1.4;">{site_from}<br/>↓<br/>{site_to}</span>
+                    </div>
+                    <div style="display: flex; gap: 24px; padding-left: 28px;">
+                        <div>
+                            <span style="color: #6c757d; font-size: 10px;">TX</span>
+                            <div style="font-size: 13px; font-weight: 600; color: #2c3e50;">{freq} MHz</div>
+                        </div>
+                        <div>
+                            <span style="color: #6c757d; font-size: 10px;">RX</span>
+                            <div style="font-size: 13px; font-weight: 600; color: #2c3e50;">{freq_pair} MHz</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Arah 2 -->
+                <div style="padding: 10px 14px;">
+                    <div style="display: flex; align-items: flex-start; margin-bottom: 8px; gap: 8px;">
+                        <span style="background: #6c757d; color: white; font-size: 10px; padding: 2px 6px; border-radius: 3px; flex-shrink: 0;">←</span>
+                        <span style="font-size: 12px; font-weight: 600; color: #212529; word-wrap: break-word; line-height: 1.4;">{site_to}<br/>↓<br/>{site_from}</span>
+                    </div>
+                    <div style="display: flex; gap: 24px; padding-left: 28px;">
+                        <div>
+                            <span style="color: #6c757d; font-size: 10px;">TX</span>
+                            <div style="font-size: 13px; font-weight: 600; color: #2c3e50;">{freq_pair} MHz</div>
+                        </div>
+                        <div>
+                            <span style="color: #6c757d; font-size: 10px;">RX</span>
+                            <div style="font-size: 13px; font-weight: 600; color: #2c3e50;">{freq} MHz</div>
+                        </div>
+                    </div>
+                </div>
             </div>
             """
-            popup = folium.Popup(popup_html, max_width=320)
+            popup = folium.Popup(popup_html, max_width=450)
             
             # Buat garis highlight untuk efek hover (muncul saat mouse over)
             # Garis ini lebih tebal dan berwarna terang sebagai indikator hover
