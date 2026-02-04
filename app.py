@@ -1,10 +1,14 @@
 import streamlit as st
 import os
+from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import traceback
 import pandas as pd
 import math
+
+# Load environment variables dari file .env
+load_dotenv()
 
 st.set_page_config(page_title="Satelit Links App", layout="wide")
 
@@ -22,7 +26,7 @@ def get_db_params():
         "port": secrets.get("port") or int(os.getenv("PGPORT", 5432)),
         "dbname": secrets.get("dbname") or os.getenv("PGDATABASE", "satelit"),
         "user": secrets.get("user") or os.getenv("PGUSER", "postgres"),
-        "password": secrets.get("password") or os.getenv("PGPASSWORD", "18agustuz203"),
+        "password": secrets.get("password") or os.getenv("PGPASSWORD"),  # Baca dari .env, jangan hardcode
     }
 
 

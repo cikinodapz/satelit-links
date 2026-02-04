@@ -47,5 +47,6 @@ desktop.ini
 *.log
 
 # Local development
+.env
 .env.local
 .env.*.local
