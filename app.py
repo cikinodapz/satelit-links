@@ -1140,27 +1140,7 @@ if use_folium:
             "name": "OSM Streets",
             "tiles": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
             "attr": "&copy; OpenStreetMap contributors",
-            "default": True  # Layer default yang ditampilkan pertama
-        },
-        {
-            "name": "Light",
-            "tiles": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-            "attr": "&copy; OpenStreetMap contributors &copy; CARTO"
-        },
-        {
-            "name": "Dark",
-            "tiles": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-            "attr": "&copy; OpenStreetMap contributors &copy; CARTO"
-        },
-        {
-            "name": "Outdoors",
-            "tiles": "https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
-            "attr": "Map tiles by Stamen Design, CC BY 3.0 — Map data &copy; OpenStreetMap contributors"
-        },
-        {
-            "name": "Esri Streets",
-            "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-            "attr": "Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, and others"
+            "default": True
         },
         {
             "name": "Esri Satellite",
@@ -1510,48 +1490,6 @@ if use_folium:
     """
     m.get_root().html.add_child(folium.Element(hover_effect_code))
 
-    # Tambahkan legend di dalam peta
-    filter_legend_html = """
-    <style>
-        #operator-legend {
-            position: fixed;
-            bottom: 50px;
-            left: 10px;
-            z-index: 9999;
-            background: white;
-            padding: 12px 16px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-            max-width: 200px;
-        }
-    </style>
-    
-    <!-- Legend di bawah -->
-    <div id="operator-legend">
-        <div style="font-weight: bold; margin-bottom: 10px; font-size: 13px; color: #333; border-bottom: 2px solid #1a73e8; padding-bottom: 6px;">
-            📡 Legend Operator
-        </div>
-        <div style="display: flex; align-items: center; margin-bottom: 6px;">
-            <div style="width: 30px; height: 6px; background: #e4002b; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🔴 Telkomsel</span>
-        </div>
-        <div style="display: flex; align-items: center; margin-bottom: 6px;">
-            <div style="width: 30px; height: 6px; background: #00529b; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🔵 Telkom</span>
-        </div>
-        <div style="display: flex; align-items: center; margin-bottom: 6px;">
-            <div style="width: 30px; height: 6px; background: #ffc600; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🟡 IOH</span>
-        </div>
-        <div style="display: flex; align-items: center;">
-            <div style="width: 30px; height: 6px; background: #8b1a8b; border-radius: 3px; margin-right: 10px;"></div>
-            <span style="color: #333;">🟣 XLSmart</span>
-        </div>
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(filter_legend_html))
 
     folium.LayerControl(position='topright', collapsed=False).add_to(m)
     st_folium(m, use_container_width=True, returned_objects=[])
