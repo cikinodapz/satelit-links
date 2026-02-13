@@ -46,12 +46,12 @@ def connect_db(params):
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS clients (
     client_id SERIAL PRIMARY KEY,
-    client_name VARCHAR(100) NOT NULL
+    client_name VARCHAR(255) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sites (
-    site_id VARCHAR(50) PRIMARY KEY,
-    site_name VARCHAR(150),
+    site_id VARCHAR(255) PRIMARY KEY,
+    site_name VARCHAR(255),
     site_address TEXT,
     lat_dec DOUBLE PRECISION,
     long_dec DOUBLE PRECISION
@@ -59,15 +59,28 @@ CREATE TABLE IF NOT EXISTS sites (
 
 CREATE TABLE IF NOT EXISTS links (
     link_id SERIAL PRIMARY KEY,
-    appl_id VARCHAR(50),
+    appl_id VARCHAR(255),
     client_id INT REFERENCES clients(client_id),
-    site_from VARCHAR(50) REFERENCES sites(site_id),
-    site_to VARCHAR(50) REFERENCES sites(site_id),
+    site_from VARCHAR(255) REFERENCES sites(site_id),
+    site_to VARCHAR(255) REFERENCES sites(site_id),
     freq INT,
     freq_pair INT,
     bandwidth INT,
-    model VARCHAR(100)
+    model VARCHAR(255)
 );
+
+-- Perbesar kolom yang sudah ada jika terlalu kecil
+DO $$
+BEGIN
+    ALTER TABLE clients ALTER COLUMN client_name TYPE VARCHAR(255);
+    ALTER TABLE sites ALTER COLUMN site_id TYPE VARCHAR(255);
+    ALTER TABLE sites ALTER COLUMN site_name TYPE VARCHAR(255);
+    ALTER TABLE links ALTER COLUMN appl_id TYPE VARCHAR(255);
+    ALTER TABLE links ALTER COLUMN site_from TYPE VARCHAR(255);
+    ALTER TABLE links ALTER COLUMN site_to TYPE VARCHAR(255);
+    ALTER TABLE links ALTER COLUMN model TYPE VARCHAR(255);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 """
 
 
@@ -695,9 +708,9 @@ with st.expander("📥 Import Data dari CSV", expanded=False):
     - `CLNT_NAME` → Client name
     - `STN_NAME` → Site name (stasiun asal)
     - `STN_ADDR` → Site address
-    - `LAT_DEC`, `LONG_DEC` → Koordinat site asal
+    - `LAT_DEC`, `LONG_DEC` → Koordinat site asal (atau `SID_LAT`/`SID_LONG`, atau kolom DMS: `LAT_DEG`/`LAT_MIN`/`LAT_SEC`/`LAT_DIR_IND`)
     - `STASIUN_LAWAN` → Site tujuan
-    - `TO_LAT_DEC`, `TO_LONG_DEC` → Koordinat site tujuan
+    - `TO_LAT_DEC`, `TO_LONG_DEC` → Koordinat site tujuan (atau kolom DMS: `TO_LAT_DEG`/`TO_LAT_MIN`/`TO_LAT_SEC`/`TO_LAT_DIR_IND`)
     - `APPL_ID`, `FREQ`, `FREQ_PAIR`, `BWIDTH`, `EQ_MDL` → Data link
     """)
     
@@ -712,6 +725,55 @@ with st.expander("📥 Import Data dari CSV", expanded=False):
             # Tampilkan preview
             st.write("**Preview Data (5 baris pertama):**")
             st.dataframe(import_df.head(), use_container_width=True, height=200)
+            
+            # --- Auto-compute LAT_DEC / LONG_DEC jika belum ada ---
+            def _dms_to_dec(deg, mn, sec, direction):
+                """Konversi DMS (degree/minute/second) ke desimal."""
+                try:
+                    d = abs(float(deg)) + float(mn) / 60.0 + float(sec) / 3600.0
+                    if str(direction).strip().upper() in ('S', 'W'):
+                        d = -d
+                    return d
+                except (ValueError, TypeError):
+                    return None
+            
+            # LAT_DEC: gunakan kolom yang sudah ada, atau SID_LAT, atau hitung dari DMS
+            if "LAT_DEC" not in import_df.columns:
+                if "SID_LAT" in import_df.columns:
+                    import_df["LAT_DEC"] = pd.to_numeric(import_df["SID_LAT"], errors="coerce")
+                    st.info("ℹ️ Kolom `LAT_DEC` dihitung dari `SID_LAT`.")
+                elif all(c in import_df.columns for c in ["LAT_DEG", "LAT_MIN", "LAT_SEC", "LAT_DIR_IND"]):
+                    import_df["LAT_DEC"] = import_df.apply(
+                        lambda r: _dms_to_dec(r["LAT_DEG"], r["LAT_MIN"], r["LAT_SEC"], r["LAT_DIR_IND"]), axis=1
+                    )
+                    st.info("ℹ️ Kolom `LAT_DEC` dihitung dari DMS (LAT_DEG/MIN/SEC/DIR_IND).")
+            
+            # LONG_DEC: gunakan kolom yang sudah ada, atau SID_LONG, atau hitung dari DMS
+            if "LONG_DEC" not in import_df.columns:
+                if "SID_LONG" in import_df.columns:
+                    import_df["LONG_DEC"] = pd.to_numeric(import_df["SID_LONG"], errors="coerce")
+                    st.info("ℹ️ Kolom `LONG_DEC` dihitung dari `SID_LONG`.")
+                elif all(c in import_df.columns for c in ["LONG_DEG", "LONG_MIN", "LONG_SEC", "LONG_DIR_IND"]):
+                    import_df["LONG_DEC"] = import_df.apply(
+                        lambda r: _dms_to_dec(r["LONG_DEG"], r["LONG_MIN"], r["LONG_SEC"], r["LONG_DIR_IND"]), axis=1
+                    )
+                    st.info("ℹ️ Kolom `LONG_DEC` dihitung dari DMS (LONG_DEG/MIN/SEC/DIR_IND).")
+            
+            # TO_LAT_DEC: hitung dari DMS tujuan
+            if "TO_LAT_DEC" not in import_df.columns:
+                if all(c in import_df.columns for c in ["TO_LAT_DEG", "TO_LAT_MIN", "TO_LAT_SEC", "TO_LAT_DIR_IND"]):
+                    import_df["TO_LAT_DEC"] = import_df.apply(
+                        lambda r: _dms_to_dec(r["TO_LAT_DEG"], r["TO_LAT_MIN"], r["TO_LAT_SEC"], r["TO_LAT_DIR_IND"]), axis=1
+                    )
+                    st.info("ℹ️ Kolom `TO_LAT_DEC` dihitung dari DMS (TO_LAT_DEG/MIN/SEC/DIR_IND).")
+            
+            # TO_LONG_DEC: hitung dari DMS tujuan
+            if "TO_LONG_DEC" not in import_df.columns:
+                if all(c in import_df.columns for c in ["TO_LONG_DEG", "TO_LONG_MIN", "TO_LONG_SEC", "TO_LONG_DIR_IND"]):
+                    import_df["TO_LONG_DEC"] = import_df.apply(
+                        lambda r: _dms_to_dec(r["TO_LONG_DEG"], r["TO_LONG_MIN"], r["TO_LONG_SEC"], r["TO_LONG_DIR_IND"]), axis=1
+                    )
+                    st.info("ℹ️ Kolom `TO_LONG_DEC` dihitung dari DMS (TO_LONG_DEG/MIN/SEC/DIR_IND).")
             
             # Cek kolom yang diperlukan
             required_cols = ["CLNT_NAME", "STN_NAME", "LAT_DEC", "LONG_DEC", "STASIUN_LAWAN", "TO_LAT_DEC", "TO_LONG_DEC"]
@@ -883,8 +945,8 @@ links_merge = links_df.merge(
     clients_df[["client_id", "client_name"]], on="client_id", how="left"
 )
 
-# Buat data untuk layer
-sites_points = sites_min.rename(columns={"site_id": "id", "site_name": "name"})
+# Buat data untuk layer (filter NaN agar peta tidak error)
+sites_points = sites_min.rename(columns={"site_id": "id", "site_name": "name"}).dropna(subset=["lat", "lon"])
 
 def _spread_overlaps(df_sites: pd.DataFrame, dist_m: float = 18.0) -> pd.DataFrame:
     # Sebar titik yang punya lat/lon identik dengan offset kecil berjari-jari dist_m
@@ -1128,24 +1190,53 @@ if use_folium:
         BeautifyIcon = None
         AntPath = None
 
+    # Build site→operator mapping from links data (dipakai untuk grouping & counting)
+    def _detect_operator(client_name_str):
+        cl = str(client_name_str).lower()
+        if 'telkomsel' in cl or 'telekomunikasi selular' in cl:
+            return 'telkomsel'
+        elif 'telkom' in cl or 'telekomunikasi indonesia' in cl:
+            return 'telkom'
+        elif 'ioh' in cl or 'indosat' in cl or 'ooredoo' in cl or 'hutchison' in cl:
+            return 'ioh'
+        elif 'xl' in cl or 'smart' in cl or 'smartfren' in cl or 'axis' in cl:
+            return 'xlsmart'
+        return None
+    
+    site_operator_map = {}  # site_id → operator key
+    if not links_merge.empty:
+        for _, lr in links_merge.iterrows():
+            op = _detect_operator(lr.get('client_name', ''))
+            if op:
+                sf = str(lr.get('site_from', ''))
+                st_val = str(lr.get('site_to', ''))
+                if sf and sf not in site_operator_map:
+                    site_operator_map[sf] = op
+                if st_val and st_val not in site_operator_map:
+                    site_operator_map[st_val] = op
+
+    # Hitung jumlah site per operator
+    from collections import Counter
+    op_site_counts = Counter(site_operator_map.values())
+
     # Buat FeatureGroup untuk setiap operator (untuk toggle di LayerControl)
     # Hanya 4 operator: Telkomsel, Telkom, IOH, dan XLSmart
     operator_groups = {
-        'telkomsel': folium.FeatureGroup(name='🔴 Telkomsel', show=True),
-        'telkom': folium.FeatureGroup(name='🔵 Telkom', show=True),
-        'ioh': folium.FeatureGroup(name='🟡 IOH', show=True),
-        'xlsmart': folium.FeatureGroup(name='🟣 XLSmart', show=True),
+        'telkomsel': folium.FeatureGroup(name=f'🔴 Telkomsel ({op_site_counts.get("telkomsel", 0)} sites)', show=True),
+        'telkom': folium.FeatureGroup(name=f'🔵 Telkom ({op_site_counts.get("telkom", 0)} sites)', show=True),
+        'ioh': folium.FeatureGroup(name=f'🟡 IOH ({op_site_counts.get("ioh", 0)} sites)', show=True),
+        'xlsmart': folium.FeatureGroup(name=f'🟣 XLSmart ({op_site_counts.get("xlsmart", 0)} sites)', show=True),
     }
     
     # Tambahkan semua group ke peta
     for group in operator_groups.values():
         group.add_to(m)
 
-    # Sites as styled markers with Tower Icons (clustered if available)
+
     for _, row in sites_points.iterrows():
         lat_v = float(row["lat"])
         lon_v = float(row["lon"])
-        tooltip = f"� {row['name']} ({row['id']})"
+        tooltip = f"📡 {row['name']} ({row['id']})"
         popup = folium.Popup(
             f"<div style='font-family: Segoe UI, Arial; padding: 4px;'>"
             f"<b style='font-size: 14px; color: #2c3e50;'>{row['name']}</b><br>"
@@ -1153,49 +1244,50 @@ if use_folium:
             f"<span style='color: #6c757d; font-size: 11px;'>📍 {lat_v:.6f}, {lon_v:.6f}</span></div>",
             max_width=280,
         )
+        
+        # Operator key untuk grouping (tower tetap biru seperti semula)
+        op_key = site_operator_map.get(str(row['id']), None)
+        
         # Custom SVG tower icon with signal waves on both sides (matching reference design)
         tower_icon = folium.DivIcon(
             html="""
             <div style="filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.3));">
                 <svg width="40" height="48" viewBox="0 0 40 48" xmlns="http://www.w3.org/2000/svg">
                     <!-- Left signal waves -->
-                    <path d="M10 6 Q6 10, 8 14" stroke="#4a5568" stroke-width="2.5" fill="none" stroke-linecap="round">
+                    <path d="M10 6 Q6 10, 8 14" stroke="#ffffff" stroke-width="2.5" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite"/>
                     </path>
-                    <path d="M7 4 Q2 10, 5 16" stroke="#4a5568" stroke-width="2" fill="none" stroke-linecap="round">
+                    <path d="M7 4 Q2 10, 5 16" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="0.8;0.3;0.8" dur="1.5s" begin="0.2s" repeatCount="indefinite"/>
                     </path>
-                    <path d="M4 2 Q-2 10, 2 18" stroke="#4a5568" stroke-width="1.5" fill="none" stroke-linecap="round">
+                    <path d="M4 2 Q-2 10, 2 18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="0.6;0.2;0.6" dur="1.5s" begin="0.4s" repeatCount="indefinite"/>
                     </path>
                     
                     <!-- Right signal waves -->
-                    <path d="M30 6 Q34 10, 32 14" stroke="#4a5568" stroke-width="2.5" fill="none" stroke-linecap="round">
+                    <path d="M30 6 Q34 10, 32 14" stroke="#ffffff" stroke-width="2.5" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite"/>
                     </path>
-                    <path d="M33 4 Q38 10, 35 16" stroke="#4a5568" stroke-width="2" fill="none" stroke-linecap="round">
+                    <path d="M33 4 Q38 10, 35 16" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="0.8;0.3;0.8" dur="1.5s" begin="0.2s" repeatCount="indefinite"/>
                     </path>
-                    <path d="M36 2 Q42 10, 38 18" stroke="#4a5568" stroke-width="1.5" fill="none" stroke-linecap="round">
+                    <path d="M36 2 Q42 10, 38 18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round">
                         <animate attributeName="opacity" values="0.6;0.2;0.6" dur="1.5s" begin="0.4s" repeatCount="indefinite"/>
                     </path>
                     
-                    <!-- Tower structure - Blue flat design -->
-                    <!-- Left leg -->
-                    <line x1="20" y1="16" x2="10" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
-                    <!-- Right leg -->
-                    <line x1="20" y1="16" x2="30" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
-                    <!-- Center pole -->
-                    <line x1="20" y1="10" x2="20" y2="46" stroke="#3182ce" stroke-width="3" stroke-linecap="round"/>
+                    <!-- Tower structure -->
+                    <line x1="20" y1="16" x2="10" y2="46" stroke="#e53e3e" stroke-width="3" stroke-linecap="round"/>
+                    <line x1="20" y1="16" x2="30" y2="46" stroke="#e53e3e" stroke-width="3" stroke-linecap="round"/>
+                    <line x1="20" y1="10" x2="20" y2="46" stroke="#e53e3e" stroke-width="3" stroke-linecap="round"/>
                     
                     <!-- X-shaped cross beams -->
-                    <line x1="13" y1="26" x2="27" y2="34" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
-                    <line x1="27" y1="26" x2="13" y2="34" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
-                    <line x1="15" y1="36" x2="25" y2="42" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
-                    <line x1="25" y1="36" x2="15" y2="42" stroke="#3182ce" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="13" y1="26" x2="27" y2="34" stroke="#e53e3e" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="27" y1="26" x2="13" y2="34" stroke="#e53e3e" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="15" y1="36" x2="25" y2="42" stroke="#e53e3e" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="25" y1="36" x2="15" y2="42" stroke="#e53e3e" stroke-width="2" stroke-linecap="round"/>
                     
                     <!-- Antenna circle at top -->
-                    <circle cx="20" cy="10" r="5" fill="#3182ce"/>
+                    <circle cx="20" cy="10" r="5" fill="#ffffff"/>
                 </svg>
             </div>
             """,
@@ -1204,7 +1296,11 @@ if use_folium:
         )
         marker = folium.Marker(location=[lat_v, lon_v], tooltip=tooltip, icon=tower_icon)
         marker.add_child(popup)
-        (mc or m).add_child(marker)
+        # Tambahkan ke operator group agar bisa di-toggle bersama link-nya
+        if op_key and op_key in operator_groups:
+            marker.add_to(operator_groups[op_key])
+        else:
+            (mc or m).add_child(marker)
 
     # Links with animated paths for nicer visuals
     if not links_df.empty:
@@ -1328,9 +1424,9 @@ if use_folium:
             
             # Deteksi operator berdasarkan nama client
             # Urutan penting: telkomsel harus dicek duluan sebelum telkom
-            if 'telkomsel' in client_lower:
+            if 'telkomsel' in client_lower or 'telekomunikasi selular' in client_lower:
                 target_group_key = 'telkomsel'
-            elif 'telkom' in client_lower:
+            elif 'telkom' in client_lower or 'telekomunikasi indonesia' in client_lower:
                 target_group_key = 'telkom'
             elif 'ioh' in client_lower or 'indosat' in client_lower or 'ooredoo' in client_lower or 'hutchison' in client_lower:
                 target_group_key = 'ioh'
